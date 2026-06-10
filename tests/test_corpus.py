@@ -119,6 +119,84 @@ def test_reingest_deletes_registry_rows_for_doc(db):
 
 
 # --------------------------------------------------------------------- #
+# Failed-COMMIT regression (2026-06-10 review): a COMMIT blocked by a
+# concurrent SHARED lock used to propagate with the transaction still
+# OPEN — every later autocommit write joined the zombie transaction and
+# was silently discarded on close().
+# --------------------------------------------------------------------- #
+
+
+def _hold_shared_lock(path):
+    """Second connection with a mid-traversal SELECT: the busy statement
+    holds a SHARED lock until the cursor is closed. Needs several rows —
+    a fully-fetched (exhausted) statement releases the lock."""
+    reader = sqlite3.connect(str(path))
+    cursor = reader.execute("SELECT * FROM documents")
+    cursor.fetchone()
+    return reader, cursor
+
+
+def test_failed_commit_rolls_back_and_does_not_poison_connection(tmp_path):
+    path = tmp_path / "c.sqlite"
+    db = CorpusDB(path, create=True)
+    for i in range(5):
+        db.add_document(f"doc{i}", "a.md", f"base text {i}", f"sha{i}")
+    # Contention is deterministic (the reader never yields until closed);
+    # the PRAGMA only shortens the wait from the default 5s.
+    db._conn.execute("PRAGMA busy_timeout = 100")
+
+    reader, cursor = _hold_shared_lock(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            db.add_document("doc9", "b.md", "new text", "sha9")
+        # The guarded ROLLBACK restored the autocommit invariant.
+        assert not db._conn.in_transaction
+    finally:
+        cursor.close()
+        reader.close()
+
+    # Later autocommit-style writes must really persist...
+    db.add_reference("REF9", "ref-9", "doc0", "core")
+    db.set_meta("note", "x")
+    # ...and a retried add_document works (no zombie transaction).
+    db.add_document("doc9", "b.md", "new text", "sha9")
+    db.close()
+
+    with CorpusDB(path) as reopened:
+        assert reopened.reference_count() == 1
+        assert reopened.get_meta("note") == "x"
+        assert reopened.doc_count() == 6
+        ok, errors = reopened.verify_corpus()
+        assert ok, errors
+
+
+def test_failed_commit_in_delete_document_rolls_back(tmp_path):
+    path = tmp_path / "c.sqlite"
+    db = CorpusDB(path, create=True)
+    for i in range(5):
+        db.add_document(f"doc{i}", "a.md", f"base text {i}", f"sha{i}")
+    db._conn.execute("PRAGMA busy_timeout = 100")
+
+    reader, cursor = _hold_shared_lock(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            db.delete_document("doc0")
+        assert not db._conn.in_transaction
+    finally:
+        cursor.close()
+        reader.close()
+
+    # The failed delete was rolled back whole; a retry succeeds.
+    assert db.doc_count() == 5
+    db.delete_document("doc0")
+    db.close()
+    with CorpusDB(path) as reopened:
+        assert reopened.doc_count() == 4
+        ok, errors = reopened.verify_corpus()
+        assert ok, errors
+
+
+# --------------------------------------------------------------------- #
 # Registries: INSERT OR IGNORE, lookups, tie-breaks
 # --------------------------------------------------------------------- #
 
@@ -301,6 +379,36 @@ def test_fingerprint_changes_with_content(tmp_path):
     assert c1.finalize_manifest() != c2.finalize_manifest()
 
 
+def test_fingerprint_binds_extracted_text_not_just_source_hash(tmp_path):
+    """Regression (2026-06-10 review): same doc ids + same source sha256
+    but different extracted text (loader drift) must yield DIFFERENT
+    fingerprints — documents.canonical is the quote-adjudication surface,
+    so an unbound fingerprint let identical fingerprints produce different
+    report bytes for the same answer."""
+    same_sha = "deadbeef" * 8
+    c1 = CorpusDB(tmp_path / "c1.sqlite", create=True)
+    c1.add_document("manual.pdf", "/corp/manual.pdf", "Safety: disconnect first.", same_sha)
+    c2 = CorpusDB(tmp_path / "c2.sqlite", create=True)
+    c2.add_document("manual.pdf", "/corp/manual.pdf", "[extraction lost this page]", same_sha)
+    assert c1.finalize_manifest() != c2.finalize_manifest()
+    c1.close()
+    c2.close()
+
+
+def test_fingerprint_binds_entity_raw_form(tmp_path):
+    """The entity raw form surfaces in report details ('closest known:
+    ...'), so corpora differing only in raw spelling must not share a
+    fingerprint."""
+
+    def build(name: str, raw: str) -> str:
+        with CorpusDB(tmp_path / name, create=True) as corpus:
+            corpus.add_document("d1", "a.md", "x", "sha")
+            corpus.add_entity("acme", raw, "d1")
+            return corpus.finalize_manifest()
+
+    assert build("e1.sqlite", "Acme") != build("e2.sqlite", "ACME")
+
+
 # --------------------------------------------------------------------- #
 # verify_corpus
 # --------------------------------------------------------------------- #
@@ -347,6 +455,42 @@ def test_verify_corpus_detects_stale_fingerprint(db):
     db.finalize_manifest()
     ok, errors = db.verify_corpus()
     assert ok, errors
+
+
+def test_verify_corpus_read_only_db_skips_fts_check_without_failing(tmp_path):
+    """Regression (2026-06-10 review): the FTS integrity check needs a
+    write transaction, so on a chmod-444 file it raised SQLITE_READONLY and
+    a pristine corpus was reported as corrupt. Read-only deployment is
+    hardening, not corruption: ok stays True, the skip is reported as a
+    distinct honest message."""
+    path = tmp_path / "ro.sqlite"
+    with CorpusDB(path, create=True) as corpus:
+        corpus.add_document("doc1", "a.md", "healthy text", "sha")
+        corpus.finalize_manifest()
+    path.chmod(0o444)
+    try:
+        with CorpusDB(path) as reopened:
+            ok, messages = reopened.verify_corpus()
+        assert ok, messages
+        assert messages == [
+            "fts integrity-check skipped: database file is read-only;"
+            " re-run on a writable copy to check the index"
+        ]
+    finally:
+        path.chmod(0o644)
+    # Back to writable: the full lock runs and passes.
+    with CorpusDB(path) as writable:
+        assert writable.verify_corpus() == (True, [])
+
+
+def test_verify_corpus_ghost_fts_entry_still_fails(db):
+    """Every OTHER DatabaseError from the integrity check keeps failing as
+    corruption — only the read-only condition is treated as skipped."""
+    db.add_document("doc1", "a.md", "healthy text", "sha")
+    db._conn.execute("INSERT INTO documents_fts(rowid, text) VALUES (999, 'ghost entry')")
+    ok, errors = db.verify_corpus()
+    assert not ok
+    assert any(e.startswith("fts integrity-check failed:") for e in errors)
 
 
 def test_verify_corpus_never_raises_on_content_problems(db):

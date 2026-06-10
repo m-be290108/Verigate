@@ -9,6 +9,13 @@ the same folder twice — into a fresh database or over an existing one —
 yields the same fingerprint and the same counts (``add_document`` upserts
 and clears the per-doc registry rows first).
 
+The folder IS the corpus (D-011): after the walk, every document whose
+doc_id was not (re-)ingested this run is deleted from the database and
+reported in ``IngestResult.pruned`` — so updating an existing database and
+building a fresh one from the identical folder yield the same content and
+the same fingerprint, and a file removed from the trusted folder stops
+verifying answers at the very next ingest.
+
 Files that cannot be loaded are *reported*, never silently dropped
 (no-silent-caps rule): every skipped file lands in ``IngestResult.skipped``
 as ``(relpath, reason)``. Two paths are consumed rather than skipped: the
@@ -74,7 +81,9 @@ class IngestResult:
     Counts are the database totals after ingestion (registry rows, not
     distinct canonicals). `skipped` lists every input file that was not
     ingested, as ``(relpath, reason)`` pairs in walk (sorted) order —
-    explicit, never silent.
+    explicit, never silent. `pruned` lists every doc_id deleted because it
+    was not (re-)ingested from the folder this run (D-011: the folder IS
+    the corpus), sorted — explicit, never silent.
     """
 
     n_docs: int
@@ -83,6 +92,7 @@ class IngestResult:
     n_entities: int
     fingerprint: str
     skipped: tuple[tuple[str, str], ...]
+    pruned: tuple[str, ...] = ()
 
 
 def _parse_glossary(path: Path) -> tuple[list[str], bytes]:
@@ -181,6 +191,12 @@ def ingest_folder(
     load is recorded in ``skipped`` and ingestion continues — one corrupt
     PDF must not block the rest of the folder.
 
+    After the walk, documents that were NOT (re-)ingested this run — files
+    deleted from the folder, plus stale versions of files now skipped — are
+    deleted from the database and reported in ``pruned`` (D-011: the corpus
+    mirrors the folder; retention is never silent, and an update over an
+    existing database matches a fresh build of the same folder).
+
     Raises :class:`ValueError` if `folder` is not an existing directory or
     if an explicit glossary is malformed.
     """
@@ -208,6 +224,8 @@ def ingest_folder(
     # sqlite journal can never appear mid-walk.
     paths = sorted(folder.rglob("*"))
     skipped: list[tuple[str, str]] = []
+    #: doc_ids upserted this run — everything else is pruned after the walk.
+    seen: set[str] = set()
 
     with CorpusDB(db_path, create=True) as db:
         for path in paths:
@@ -236,6 +254,7 @@ def ingest_folder(
                 continue
             sha256 = hashlib.sha256(source_bytes).hexdigest()
             db.add_document(relpath, str(path), text, sha256)
+            seen.add(relpath)
             for atom in extract_references(text, packs):
                 db.add_reference(atom.canonical, atom.raw, relpath, atom.pack)
             for atom in extract_numbers(text):
@@ -255,6 +274,17 @@ def ingest_folder(
                 hashlib.sha256(glossary_bytes).hexdigest(),
             )
             _add_entities(db, glossary_entries, doc_id)
+            seen.add(doc_id)
+
+        # Prune (D-011): the folder IS the corpus. Any document not
+        # (re-)ingested this run no longer exists in the source folder (or
+        # is no longer loadable) and is deleted — the D-007 AFTER DELETE
+        # trigger keeps the FTS index consistent — and reported, so the
+        # update-vs-fresh-build fingerprints stay identical and stale
+        # documents stop verifying answers.
+        pruned = tuple(doc_id for doc_id in db.doc_ids() if doc_id not in seen)
+        for doc_id in pruned:
+            db.delete_document(doc_id)
 
         fingerprint = db.finalize_manifest()
         return IngestResult(
@@ -264,4 +294,5 @@ def ingest_folder(
             n_entities=db.entity_count(),
             fingerprint=fingerprint,
             skipped=tuple(skipped),
+            pruned=pruned,
         )

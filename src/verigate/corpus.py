@@ -11,6 +11,7 @@ ghost rowids corrupted 32% of a production index).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -135,6 +136,11 @@ class CorpusDB:
         the caller can re-register them from the fresh text.
         """
         canonical = canonical_text(text)
+        # COMMIT lives INSIDE the protected block (mirrors AuditTrail.record):
+        # a failed COMMIT (e.g. 'database is locked' past the busy timeout)
+        # leaves the transaction OPEN; without the guarded ROLLBACK below the
+        # connection is poisoned — later autocommit writes silently join the
+        # zombie transaction and are discarded on close().
         self._conn.execute("BEGIN")
         try:
             self._conn.execute("DELETE FROM refs WHERE doc_id = ?", (doc_id,))
@@ -152,24 +158,31 @@ class CorpusDB:
                 """,
                 (doc_id, source_path, sha256, text, canonical),
             )
-        except sqlite3.Error:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
+            self._conn.execute("COMMIT")
+        finally:
+            # Reached with an open transaction only when something above
+            # raised (BaseException included — the exception keeps
+            # propagating past this cleanup, restoring autocommit).
+            if self._conn.in_transaction:
+                with contextlib.suppress(sqlite3.Error):
+                    self._conn.execute("ROLLBACK")
 
     def delete_document(self, doc_id: str) -> None:
         """Remove a document and its registry rows. The AFTER DELETE trigger
         removes the FTS entry with the OLD text values ('delete' command)."""
+        # Same COMMIT-inside-try + guarded-ROLLBACK pattern as add_document:
+        # a failed COMMIT must never leave a zombie transaction behind.
         self._conn.execute("BEGIN")
         try:
             self._conn.execute("DELETE FROM refs WHERE doc_id = ?", (doc_id,))
             self._conn.execute("DELETE FROM numbers WHERE doc_id = ?", (doc_id,))
             self._conn.execute("DELETE FROM entities WHERE doc_id = ?", (doc_id,))
             self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
-        except sqlite3.Error:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
+            self._conn.execute("COMMIT")
+        finally:
+            if self._conn.in_transaction:
+                with contextlib.suppress(sqlite3.Error):
+                    self._conn.execute("ROLLBACK")
 
     def add_reference(self, canonical: str, raw: str, doc_id: str, pack: str) -> None:
         """Register a reference occurrence. INSERT OR IGNORE — registry rows
@@ -212,11 +225,21 @@ class CorpusDB:
 
     def _compute_fingerprint(self) -> str:
         """sha256 over a deterministic JSON serialization of the corpus
-        content sets: (doc_id, sha256) pairs, distinct ref (canonical, pack),
-        distinct number (canonical, kind), distinct entity canonicals — all
-        sorted in Python (code-point order, collation-independent)."""
+        content sets: (doc_id, sha256, sha256(canonical)) triples, distinct
+        ref (canonical, pack), distinct number (canonical, kind), distinct
+        entity (canonical, raw) pairs — all sorted in Python (code-point
+        order, collation-independent).
+
+        The canonical-text hash binds the extracted text that quote
+        adjudication actually matches against (contains_text), and the
+        entity raw form surfaces in report details ('closest known: ...') —
+        without both, two corpora with identical fingerprints could yield
+        different report bytes for the same answer (loader-drift hole)."""
         docs = sorted(
-            tuple(r) for r in self._conn.execute("SELECT id, sha256 FROM documents")
+            (doc_id, sha256, hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+            for doc_id, sha256, canonical in self._conn.execute(
+                "SELECT id, sha256, canonical FROM documents"
+            )
         )
         refs = sorted(
             tuple(r) for r in self._conn.execute("SELECT DISTINCT canonical, pack FROM refs")
@@ -224,12 +247,14 @@ class CorpusDB:
         numbers = sorted(
             tuple(r) for r in self._conn.execute("SELECT DISTINCT canonical, kind FROM numbers")
         )
-        ents = sorted(r[0] for r in self._conn.execute("SELECT DISTINCT canonical FROM entities"))
+        ents = sorted(
+            tuple(r) for r in self._conn.execute("SELECT DISTINCT canonical, raw FROM entities")
+        )
         payload = {
             "documents": [list(p) for p in docs],
             "refs": [list(p) for p in refs],
             "numbers": [list(p) for p in numbers],
-            "entities": ents,
+            "entities": [list(p) for p in ents],
         }
         blob = json.dumps(
             payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
@@ -337,6 +362,12 @@ class CorpusDB:
         """Number of documents."""
         return self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
 
+    def doc_ids(self) -> list[str]:
+        """All document ids, sorted (used by the ingestor's prune pass)."""
+        return [
+            row[0] for row in self._conn.execute("SELECT id FROM documents ORDER BY id")
+        ]
+
     def reference_count(self) -> int:
         """Number of reference registry rows."""
         return self._conn.execute("SELECT COUNT(*) FROM refs").fetchone()[0]
@@ -363,16 +394,33 @@ class CorpusDB:
         3. no refs/numbers/entities row points to a missing doc_id;
         4. the stored fingerprint (if set) equals the recomputed one.
 
-        Returns (ok, errors). Content problems are reported, never raised.
+        Returns (ok, messages). Content problems are reported, never raised.
+        The FTS check (1) needs a write transaction even though it only
+        verifies; on a read-only database file it is reported as *skipped*
+        (a distinct message in `messages`) without flipping `ok` — a
+        read-only deployment is hardening, not corruption, and every other
+        check still runs read-only.
         """
         errors: list[str] = []
+        skipped: list[str] = []
 
         try:
             self._conn.execute(
                 "INSERT INTO documents_fts(documents_fts, rank) VALUES('integrity-check', 1)"
             )
         except sqlite3.DatabaseError as exc:
-            errors.append(f"fts integrity-check failed: {exc}")
+            if exc.sqlite_errorcode == sqlite3.SQLITE_READONLY:
+                # Stepping the integrity-check INSERT requires a write
+                # transaction, so it cannot run on a read-only file. That is
+                # a property of the deployment (chmod 444, read-only mount —
+                # plausible hardening for an immutable corpus), NOT index
+                # corruption: report honestly, do not fail the lock.
+                skipped.append(
+                    "fts integrity-check skipped: database file is read-only;"
+                    " re-run on a writable copy to check the index"
+                )
+            else:
+                errors.append(f"fts integrity-check failed: {exc}")
 
         for doc_id, text, canonical in self._conn.execute(
             "SELECT id, text, canonical FROM documents ORDER BY id"
@@ -392,7 +440,9 @@ class CorpusDB:
         if stored and stored != self._compute_fingerprint():
             errors.append("fingerprint: stored value does not match recomputed corpus content")
 
-        return (not errors, errors)
+        # `ok` is decided by errors alone; skipped checks are reported in the
+        # returned messages but never fail the lock.
+        return (not errors, errors + skipped)
 
     # ------------------------------------------------------------------ #
     # Lifecycle

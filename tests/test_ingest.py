@@ -142,6 +142,78 @@ def test_reingest_same_db_idempotent(sample_corpus_dir, tmp_path):
         assert db.verify_corpus() == (True, [])
 
 
+# ------------------------------------------------------- pruned (explicit)
+
+
+def _two_file_folder(tmp_path: Path) -> Path:
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "keep.md").write_text("# Keep\nWarranty: 24 months.\n", encoding="utf-8")
+    (folder / "obsolete.md").write_text(
+        "# Obsolete\nOld price: 999.99 EUR. SKU OB-1234-Z.\n", encoding="utf-8"
+    )
+    return folder
+
+
+def test_reingest_prunes_deleted_file_and_reports_it(tmp_path):
+    """Regression (2026-06-10 review, D-011): a file removed from the
+    trusted folder must leave the corpus at the next ingest — doc gone, FTS
+    finds nothing from it, fingerprint changes, prune is reported."""
+    folder = _two_file_folder(tmp_path)
+    db_path = tmp_path / "corpus.db"
+    r1 = ingest_folder(folder, db_path)
+    assert r1.n_docs == 2
+    assert r1.pruned == ()
+
+    (folder / "obsolete.md").unlink()
+    r2 = ingest_folder(folder, db_path)
+
+    assert r2.pruned == ("obsolete.md",)
+    assert r2.n_docs == 1
+    assert r2.fingerprint != r1.fingerprint
+    with CorpusDB(db_path) as db:
+        assert db.doc_ids() == ["keep.md"]
+        assert db.search("OB-1234-Z") == []
+        assert db.search("Obsolete") == []
+        assert db.has_reference(canonical_ref("OB-1234-Z")) is None
+        assert db.has_number("money:EUR:999.99", kind="money") is None
+        assert db.contains_text(canonical_text("Old price: 999.99 EUR")) is None
+        assert db.verify_corpus() == (True, [])
+
+
+def test_update_ingest_matches_fresh_build_after_deletion(tmp_path):
+    """The fingerprint in a report must be reproducible from the source
+    folder alone: updating an existing db equals a fresh build of the
+    identical folder (D-011)."""
+    folder = _two_file_folder(tmp_path)
+    db_path = tmp_path / "updated.db"
+    ingest_folder(folder, db_path)
+    (folder / "obsolete.md").unlink()
+    updated = ingest_folder(folder, db_path)
+    fresh = ingest_folder(folder, tmp_path / "fresh.db")
+    assert updated.fingerprint == fresh.fingerprint
+    assert (updated.n_docs, updated.n_refs, updated.n_numbers, updated.n_entities) == (
+        fresh.n_docs,
+        fresh.n_refs,
+        fresh.n_numbers,
+        fresh.n_entities,
+    )
+
+
+def test_glossary_doc_counts_as_seen_never_pruned(tmp_path):
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "note.txt").write_text("nothing here\n", encoding="utf-8")
+    (folder / "glossary.yaml").write_text("- AquaPump 3000\n", encoding="utf-8")
+    db_path = tmp_path / "corpus.db"
+    r1 = ingest_folder(folder, db_path)
+    r2 = ingest_folder(folder, db_path)
+    assert r2.pruned == ()
+    assert r2.fingerprint == r1.fingerprint
+    with CorpusDB(db_path) as db:
+        assert db.has_entity(canonical_entity("AquaPump 3000")) == "glossary.yaml"
+
+
 # ----------------------------------------------------- skipped (explicit)
 
 
