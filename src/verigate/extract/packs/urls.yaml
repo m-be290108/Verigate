@@ -1,0 +1,12 @@
+# All pack regexes are compiled with re.IGNORECASE (uniform policy, see
+# references.py).
+name: urls
+description: "HTTP(S) URLs; trailing .,;: punctuation stays out of the span."
+patterns:
+  # Trailing punctuation is excluded structurally (the final one-char class
+  # cannot be . , ; or :), not sliced off after the fact, so the atom span
+  # always equals the matched text. canonical_ref strips dots/dashes from
+  # URLs too — intended: it is a matching key, and ingest applies the same
+  # canonical_ref on the corpus side.
+  - id: http
+    regex: 'https?://[^\s"''<>)\]]*[^\s"''<>)\].,;:]'

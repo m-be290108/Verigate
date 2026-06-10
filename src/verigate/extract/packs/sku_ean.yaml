@@ -1,0 +1,17 @@
+# All pack regexes are compiled with re.IGNORECASE (uniform policy, see
+# references.py). Case-sensitive fragments use a scoped (?-i:…) group.
+name: sku_ean
+description: Catalog SKU codes (optional SKU prefix) and EAN-8 / EAN-13 digit runs.
+patterns:
+  # Catalog subset of generic: hyphen-joined UPPERCASE segments with >=1
+  # letter and >=1 digit, optionally introduced by 'SKU' / 'SKU:'. The named
+  # group `ref` keys the atom on the bare code so 'SKU AP-3000-X' and
+  # 'AP-3000-X' share one canonical key.
+  - id: sku
+    regex: '(?<![A-Za-z0-9.-])(?:SKU[ :]+)?(?P<ref>(?-i:(?=[A-Z0-9-]{4,32}(?![A-Z0-9-]))(?=[A-Z-]*[0-9])(?=[0-9-]*[A-Z])[A-Z0-9]+(?:-[A-Z0-9]+)+))(?![A-Za-z0-9-])'
+  # EAN checksums are deliberately NOT validated: a wrong-checksum claimed
+  # EAN must still be extracted, then fail the corpus lookup.
+  - id: ean13
+    regex: '\b[0-9]{13}\b'
+  - id: ean8
+    regex: '\b[0-9]{8}\b'

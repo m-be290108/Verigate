@@ -1,0 +1,10 @@
+# All pack regexes are compiled with re.IGNORECASE (uniform policy, see
+# references.py). Case-sensitive fragments use a scoped (?-i:…) group.
+name: generic
+description: Uppercase-ish multi-segment codes — AP-3000-X, DOC_2024_117, TICKET-8841.
+patterns:
+  # >=2 alphanumeric segments joined by - _ /, >=1 digit, >=1 UPPERCASE letter
+  # (the (?-i:…) group keeps plain hyphenated prose like 'well-known' or
+  # 'covid-19' out), total length 4..40, never starting/ending mid-run.
+  - id: code
+    regex: '(?<![A-Za-z0-9._/-])(?=[A-Za-z0-9_/-]{4,40}(?![A-Za-z0-9_/-]))(?=[A-Za-z_/-]*[0-9])(?=(?-i:[a-z0-9_/-]*[A-Z]))[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)+(?![A-Za-z0-9_/-])'

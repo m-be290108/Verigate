@@ -1,0 +1,14 @@
+# All pack regexes are compiled with re.IGNORECASE (uniform policy, see
+# references.py).
+name: doi_iso
+description: DOIs, ISO / ISO-IEC standard numbers, and RFC numbers.
+patterns:
+  # The final one-char class forbids ending on punctuation, so a trailing
+  # ')' or sentence '.' is never swallowed while internal '(20)31142-9'
+  # style fragments still match.
+  - id: doi
+    regex: '\b10\.[0-9]{4,9}/[^\s"<>\]]*[^\s"<>\].,;:)]'
+  - id: iso
+    regex: '\bISO(?:/IEC)?[ ]?[0-9]{3,5}(?::[0-9]{4})?(?![0-9])'
+  - id: rfc
+    regex: '\bRFC[ -]?[0-9]{3,5}(?![0-9])'

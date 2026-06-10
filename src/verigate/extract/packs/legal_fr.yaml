@@ -1,0 +1,22 @@
+# All pack regexes are compiled with re.IGNORECASE (uniform policy, see
+# references.py). Ported from the production-proven Beaume patterns
+# (verificateur.py F2 fix + dossier_citations.py).
+name: legal_fr
+description: French legal references — prefixed code articles, prose article-du-code, Cass. case law.
+patterns:
+  # Bare prefixed refs in prose (Beaume audit F2: plurals/enumerations like
+  # 'Les articles L.8888-1 et L.7777-2' must yield BOTH refs). Three branches:
+  # dotted (L.1233 / L. 1233-3), spaced-with-suffix (L 1233-3), glued (L1233).
+  # A spaced ref WITHOUT suffix is deliberately not matched: under IGNORECASE
+  # it would turn French prose 'il y a 1234 raisons' into a citation.
+  - id: prefixed_article
+    regex: '(?<![A-Za-z0-9.-])[LRDA](?:\.[ ]?[0-9]{3,4}(?:-[0-9]+){0,2}|[ ]?[0-9]{3,4}(?:-[0-9]+){1,2}|[0-9]{3,4}(?:-[0-9]+){0,2})(?![A-Za-z0-9_-])'
+  # Prose 'article(s) N du code X': the named group `ref` keys the atom on N
+  # while the span stays over the whole matched phrase. The lookahead stops
+  # the lazy code-name capture before connectives/punctuation.
+  - id: prose_article_du_code
+    regex: '\barticles?\s+(?P<ref>[0-9]{1,4}(?:-[0-9]{1,4})?)\s+du\s+(?:code\s+[a-zà-ÿ''’ -]{3,60}?)(?=[,.;:\n)]|\s+(?:et|ou|qui|dont|est|sont|prévoi|dispose)\b|$)'
+  # Case law: 'Cass. soc., 12 mai 2021, n°19-12.345' — keyed on the pourvoi
+  # number, span over the whole citation.
+  - id: cass_case_law
+    regex: '(?:Cass\.|Cour\s+de\s+cassation)[^\[\]\n]{0,60}?n\s?°\s?(?P<ref>[0-9]{2}[-.][0-9]{2,6}(?:\.[0-9]{1,4})?)'
