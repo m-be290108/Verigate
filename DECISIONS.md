@@ -68,6 +68,32 @@ engine with nothing but Python 3.11 + PyYAML — an on-premise selling point.
 ## D-010 — CLI exit codes mirror the verdict gradation
 `verigate verify` exits 0 VERIFIED / 1 CORRECTED / 2 INSUFFICIENT /
 3 UNVERIFIABLE, so shell pipelines and CI gates can branch on the verdict
-without parsing output. `ingest`/`verify-corpus`/`audit-export` use 0/1.
-`serve` refuses non-loopback hosts (on-premise contract: localhost by
-default, rebinding is a deliberate customer decision, not a flag typo).
+without parsing output. Exit 4 = operational failure (e.g. stdout cannot
+encode the report) — an I/O failure must never alias a verdict.
+`ingest`/`verify-corpus`/`audit-export` use 0/1. `serve` refuses
+non-loopback hosts (on-premise contract: localhost by default, rebinding is
+a deliberate customer decision, not a flag typo).
+
+## D-011 — Re-ingest prunes documents removed from the source folder
+The customer folder IS the corpus: a document deleted from the folder is
+deleted from corpus.db at the next ingest (FTS stays consistent via the
+D-007 triggers) and reported in `IngestResult.pruned` — explicit, never
+silent. Rejected: silent retention (stale docs kept verifying answers and
+the fingerprint was not reproducible from the folder alone).
+
+## D-012 — Ambiguous straight quotes are not extracted
+Straight `"` is also the inch/second/ditto mark. Openers/closers must sit
+on word boundaries, and if the count of plausible straight-quote delimiters
+in an answer is odd, NO straight-quote atom is extracted from it
+(typographic `“ ”` and `« »` are unambiguous and unaffected). Deleting
+innocent prose on a mispair is strictly worse than leaving one quote
+unchecked (2026-06-10 review finding, HIGH).
+
+## D-013 — Membership, not association (and the bench says so)
+An atom is VERIFIED when its canonical form exists anywhere in the corpus;
+VeriGate does not check that the value belongs to the sentence's subject.
+Cross-attribution lies (real price, wrong product) pass. This is stated in
+the README limitations and the bench caveat (whose injected lies are novel
+by construction and thus cannot measure this failure mode). Rejected:
+claiming "catches wrong prices" unqualified — that was an overclaim
+(2026-06-10 review finding, HIGH).

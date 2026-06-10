@@ -9,23 +9,165 @@ No LLM. No network. On-premise only. Audit-ready.
 > cannot be verified is flagged. Never a blind blessing. Tamper-evident
 > audit log included.
 
-*(Skeleton README — pitch, demo and bench numbers land at the end of the MVP.)*
+Built for teams whose chatbot or RAG is already in production — legaltech,
+e-commerce, pharma, finance, support — and who are being called out on
+invented references, wrong prices, fabricated clauses.
 
-## What VeriGate is — and is not (honesty section)
+## How it works
+
+```
+ your documents                    your AI's answer
+ (pdf docx md txt csv json)               │
+        │                                 ▼
+        ▼                        ┌─────────────────┐
+  verigate ingest ──▶ corpus.db  │  extract atoms   │  references, figures,
+  (FTS5 + ID registry            │  (pure regex,    │  quotes, glossary
+   + glossary + SHA-256          │   deterministic) │  entities
+   provenance manifest)          └────────┬────────┘
+                                          ▼
+                                 ┌─────────────────┐
+                  corpus.db ───▶ │  verify each     │ ──▶ Report (JSON)
+                                 │  atom            │      verdict + score
+                                 └────────┬────────┘      + per-atom status
+                                          ▼
+                              corrected answer: false atoms
+                              removed, visibly marked
+                              ⟨unverified reference, removed⟩
+                                          │
+                                          ▼
+                              tamper-evident audit trail
+                              (HMAC chain, verified at export)
+```
+
+Verdicts are graduated, never vacuous: **VERIFIED** (every checkable atom
+grounded), **CORRECTED** (false atoms removed, marked), **INSUFFICIENT**
+(mostly ungrounded), **UNVERIFIABLE** (nothing checkable — score 0.0, never
+a free 100%).
+
+## Quickstart
+
+```bash
+pip install -e ".[api,ingest]"
+
+verigate ingest ./your-data --db corpus.db     # builds the trusted corpus
+verigate verify --db corpus.db "Our pump AP-3000-X costs €249.99."
+verigate serve  --db corpus.db                 # localhost API
+```
+
+Or three lines of Python around any LLM call:
+
+```python
+from verigate import Gate
+gate = Gate("corpus.db")
+report = gate.verify(answer)        # report.corrected_answer, report.verdict
+```
+
+See it catch hallucinations right now (no setup beyond the repo):
+
+```bash
+PYTHONPATH=src python examples/proof.py
+```
+
+## What it checks
+
+| Atom | Examples | Verified against |
+|---|---|---|
+| References / IDs | SKU, legal refs, DOI/ISO/RFC, internal URLs, `[REF: …]` | ID registry built at ingest (+ custom YAML packs) |
+| Anchored figures | `€249.99`, `25 %`, `230 V`, `24 months`, dates | number index built at ingest |
+| Quotes | text between `"…"`, `“…”`, `« … »` (≥ 3 words) | normalized full-text containment |
+| Glossary entities | product names, people — incl. near-misses (`AquaJet 2500` vs known `AquaJet 2200`) | glossary built at ingest |
+
+Customers add their own reference formats as YAML regex packs — one file,
+no code.
+
+## What VeriGate is — and is not (read this before buying)
 
 VeriGate does **not** "detect hallucinations" in any magical sense. It
-verifies the **verifiable atoms** of an answer against a trusted corpus:
+verifies the **verifiable atoms** of an answer against a trusted corpus, and
+it checks **groundedness, not truth**: a claim that is true in the world but
+absent from your corpus is flagged, because your corpus is the contract.
+Free-form prose containing no checkable atom is marked **unverifiable** —
+never validated.
 
-- **references / identifiers** (SKUs, legal refs, DOIs, internal codes…),
-- **anchored figures** (money, percentages, numbers with units, dates),
-- **quoted text** (does this sentence exist in the corpus?),
-- **glossary entities** (product names, people, reference amounts).
+Known limitations, by design (each one is a deliberate false-positive
+trade-off, documented in `DECISIONS.md`):
 
-Free-form prose that contains none of these is marked **unverifiable** —
-never validated. That is precisely what makes the product defensible: a
-score that means something, reproducible byte-for-byte, that you can show a
-regulator or a customer. Any marketing claim beyond this is a lie, and this
-repository refuses to make it.
+- **Membership, not association**: an atom is VERIFIED when it appears
+  *anywhere* in your corpus. A real value attributed to the wrong subject
+  (product A sold at product B's genuine price, a real article number cited
+  for the wrong rule) is **not** caught. VeriGate proves "this value exists
+  in your data", not "this value belongs to this sentence's subject".
+- Bare small integers ("the window is 25") are not checked — only anchored
+  figures (money, %, units, dates) are.
+- Quotes under 3 words and single-quoted text are not checked.
+- An invented entity name *far* from anything in the glossary is flagged
+  `unverifiable`, not `false` (near-misses are caught; pure inventions of
+  unknown shape have nothing to be checked against).
+- Paraphrased quotes are not matched — verbatim (normalized) only.
+- Identifiers in prose are redacted only when they match a known pack
+  format: if a flagged `[REF: X]` has a bare twin `X` of a shape no pack
+  recognizes, the twin survives as unverifiable prose.
+- Coverage is exactly the formats above plus your packs. A lie outside the
+  covered formats passes through as unverifiable prose.
+
+That is precisely what makes the product defensible: a score that means
+something, reproducible **byte-for-byte** (same corpus + same answer →
+identical report, proven by test), that you can show a regulator or a
+customer. Any marketing claim beyond this is a lie, and this repository
+refuses to make it.
+
+## Benchmark — both numbers, always
+
+A detector that misses lies is worthless; so is one that cries wolf. The
+self-validating bench generates a synthetic corpus, injects **one labeled
+hallucination per corrupted answer** (7 types: mutated SKU, wrong price,
+distorted quote, entity variant, mutated EAN, wrong URL path, wrong warranty
+duration) and measures both directions:
+
+| Metric | Result (full run: 100 products, 150 clean + 250 corrupted answers) | Gate |
+|---|---|---|
+| Detection rate (injected lies flagged) | **100.0 %** | ≥ 95 % |
+| False-positive rate (grounded atoms wrongly flagged) | **0.00 %** | ≤ 2 % |
+
+Reproduce: `make bench-quick` (CI-gated) or
+`PYTHONPATH=src python -m bench.run` (full). Same seed → byte-identical
+output. **Honest caveat**: these numbers are on synthetic, anchored-atom
+lies within the covered types above — they say "the machine does exactly
+what it promises on what it covers", not "no hallucination can pass".
+Every injected lie is novel by construction (its value appears nowhere in
+the corpus), so the figure measures detection of *absent* values only; it
+cannot and does not measure cross-attribution errors (a real corpus value
+attributed to the wrong subject — see limitations above).
+
+## Compliance
+
+- **Deterministic**: no LLM judge, no temperature, no drift. Same inputs,
+  same bytes. 360 tests, zero network (enforced by a socket-guard test).
+- **On-premise**: your data never leaves. The API binds localhost; there is
+  no telemetry, no cloud, no outbound call anywhere in the codebase.
+- **Tamper-evident audit trail**: every verification is journaled (answer
+  hash — never the raw text —, verdict, score, rejected atoms) in an
+  HMAC-SHA256 hash chain with an out-of-database anchor; the chain is
+  re-verified at every export. Designed for AI-Act-style accountability
+  conversations. *Threat model, stated plainly*: tamper-evidence holds
+  against modification of the audit database alone. By default the HMAC
+  secret lives in a 0600 file next to the database, so an attacker with
+  full local filesystem access could read it and forge a passing chain —
+  for that threat model, supply the secret out-of-band
+  (`VERIGATE_AUDIT_SECRET` or an explicit `secret=`).
+
+## The honest sales pitch
+
+**What it catches**: invented references/SKUs/articles in any format
+(bracketed, parenthesized, prose), figures absent from your corpus (a wrong
+price that is no record's real price), distorted quotes, near-miss product
+names — removed and visibly marked `⟨unverified …, removed⟩`, never
+silently corrected.
+
+**What it doesn't catch**: lies told in plain prose without a checkable
+atom, paraphrased quotes, inventions with no anchor in your glossary or
+packs. Those are flagged unverifiable at best — which is the honest signal
+that a human should look.
 
 ## License
 
