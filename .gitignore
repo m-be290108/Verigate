@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.db
+*.db-wal
+*.db-shm
+.audit_salt
+.*.hmac_secret
+.*.anchor
+.DS_Store
