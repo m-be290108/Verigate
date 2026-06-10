@@ -284,6 +284,78 @@ def test_repeated_false_atom_all_occurrences_replaced(verifier):
     assert rep.score == 0.0
 
 
+def test_non_pack_identifier_bare_twin_survives_pinned_limitation(verifier):
+    # PINS a DOCUMENTED LIMITATION (see the README limitations section):
+    # layer (a) of the reference extractor treats every [REF: X] as an atom
+    # unconditionally, but bare/parenthesized twins of X are only extracted
+    # when X matches a loaded pack pattern. An all-lowercase identifier
+    # matches no pack (the generic pack requires an uppercase letter), so
+    # after its [REF:]-tagged form is adjudicated NOT_FOUND and removed, the
+    # bare twins survive in prose. This is deliberate: sweeping arbitrary
+    # non-pack tokens out of prose could shred innocent text; D-001 covers
+    # every format the extractors KNOW, not arbitrary tokens.
+    answer = (
+        "Per [REF: kb_internal_policy_doc_7], see also "
+        "kb_internal_policy_doc_7 (kb_internal_policy_doc_7)."
+    )
+    rep = verifier.verify(answer)
+    refs = [r for r in rep.atoms if r.atom.type is AtomType.REFERENCE]
+    assert len(refs) == 1  # only the [REF: …] form is an atom
+    assert refs[0].status is AtomStatus.NOT_FOUND
+    assert rep.corrected_answer == (
+        f"Per {REMOVAL_MARKERS[AtomType.REFERENCE]}, see also "
+        "kb_internal_policy_doc_7 (kb_internal_policy_doc_7)."
+    )
+    assert rep.corrected_answer.count("kb_internal_policy_doc_7") == 2
+
+
+# ------------------------------------------------- input-marker provenance
+
+_WARN_INPUT_MARKER = (
+    "input already contained a VeriGate removal marker; "
+    "markers in corrected_answer are not all VeriGate-issued"
+)
+
+
+def test_input_embedded_removal_marker_warns_about_provenance(verifier):
+    # Review regression: a marker typed INTO the answer used to flow through
+    # silently — a VERIFIED report whose corrected_answer carried a
+    # 'removed' marker while counts.false == 0. The marker still passes
+    # through (output == input, nothing was changed), but the report must
+    # now warn that marker provenance is not guaranteed.
+    answer = (
+        "Per our terms ⟨unverified reference, removed⟩ "
+        "the AquaPump 3000 ships free."
+    )
+    rep = verifier.verify(answer)
+    assert rep.verdict is Verdict.VERIFIED
+    assert rep.n_false == 0
+    assert REMOVAL_MARKERS[AtomType.REFERENCE] in rep.corrected_answer
+    assert _WARN_INPUT_MARKER in rep.warnings
+
+
+def test_input_marker_warning_for_every_marker_kind(verifier):
+    for marker in REMOVAL_MARKERS.values():
+        rep = verifier.verify(f"the AquaPump 3000 with {marker} inside.")
+        assert _WARN_INPUT_MARKER in rep.warnings
+
+
+def test_input_marker_warning_combines_with_nothing_checkable(verifier):
+    rep = verifier.verify("see ⟨unverified figure, removed⟩ above.")
+    assert rep.verdict is Verdict.UNVERIFIABLE
+    # Deterministic ordering: provenance warning first, then D-002 warning.
+    assert rep.warnings == [
+        _WARN_INPUT_MARKER,
+        "No verifiable atoms found; nothing in this answer could be checked "
+        "against the corpus.",
+    ]
+
+
+def test_no_input_marker_no_provenance_warning(verifier):
+    rep = verifier.verify(CLEAN_ANSWER)
+    assert _WARN_INPUT_MARKER not in rep.warnings
+
+
 # -------------------------------------------------------- score and verdict
 
 

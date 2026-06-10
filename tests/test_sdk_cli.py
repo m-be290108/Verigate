@@ -2,8 +2,10 @@
 
 Everything is deterministic and offline: real files in tmp_path, real
 sqlite, the in-repo sample corpus fixture — no network, no LLM. The CLI is
-exercised through ``main(argv)`` (in-process, exit code returned), never
-through a subprocess.
+exercised through ``main(argv)`` (in-process, exit code returned); the only
+exception is the encoding-robustness test, which MUST run a subprocess to
+observe the interpreter's own exit behavior under a hostile
+``PYTHONIOENCODING``.
 """
 
 from __future__ import annotations
@@ -11,7 +13,11 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -433,6 +439,61 @@ def test_cli_audit_export_missing_db_exit_1(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 1
     assert "not found" in captured.err
+
+
+# ========================================== CLI: output encoding (D-010)
+
+#: Absolute src/ path so the subprocess imports this working tree.
+_SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")
+
+
+@pytest.mark.parametrize("json_flag", [False, True], ids=["human", "json"])
+def test_cli_verify_ascii_stdout_never_aliases_a_verdict(corpus_db, json_flag):
+    """Regression: the report contains non-ASCII by construction (verdict
+    em-dash, ✅/❌ icons, ⟨…⟩ markers, the answer's own €). Without forced
+    UTF-8 stdout, PYTHONIOENCODING=ascii made print() raise
+    UnicodeEncodeError and the interpreter exit 1 — which D-010 defines as
+    CORRECTED. The CLI must exit with the true verdict (0 here) or the
+    operational code 4; never 1/2/3 caused by an encoding failure."""
+    env = dict(os.environ, PYTHONIOENCODING="ascii")
+    env["PYTHONPATH"] = _SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
+    cmd = [sys.executable, "-m", "verigate.cli", "verify", "--db", str(corpus_db)]
+    if json_flag:
+        cmd.append("--json")
+    cmd.append(VERIFIED_ANSWER)
+    proc = subprocess.run(cmd, capture_output=True, check=False, env=env)
+    assert proc.returncode in (0, 4), (
+        f"exit {proc.returncode} aliases a verdict; "
+        f"stderr: {proc.stderr.decode('utf-8', 'replace')}"
+    )
+    if proc.returncode == 0:
+        # The fix forces UTF-8: the report bytes do not depend on the locale.
+        out = proc.stdout.decode("utf-8")
+        assert "VERIFIED" in out
+
+
+class _AsciiOnlyStdout:
+    """A stdout WITHOUT ``.reconfigure()`` that refuses non-ASCII writes —
+    models a wrapped/legacy stream the hasattr guard cannot repair."""
+
+    def write(self, s: str) -> int:
+        s.encode("ascii")  # raises UnicodeEncodeError on the em-dash/icons
+        return len(s)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_cli_verify_unencodable_stdout_is_operational_error(
+    corpus_db, monkeypatch, capsys
+):
+    # When stdout cannot be reconfigured AND cannot encode the report, the
+    # exit code must be 4 (operational), never the interpreter's 1.
+    monkeypatch.setattr(sys, "stdout", _AsciiOnlyStdout())
+    rc = main(["verify", "--db", str(corpus_db), VERIFIED_ANSWER])
+    captured = capsys.readouterr()
+    assert rc == 4
+    assert "cannot write the report to stdout" in captured.err
 
 
 # ============================================================= CLI: serve

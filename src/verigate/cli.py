@@ -12,10 +12,18 @@ for shell pipelines and CI gates:
 Exit codes (D-010 — branch on the verdict without parsing output):
 
 - ``verify``: 0 VERIFIED, 1 CORRECTED, 2 INSUFFICIENT, 3 UNVERIFIABLE;
-  4 on an operational error (missing database, unreadable context file) so
-  an infrastructure failure can never be mistaken for a CORRECTED verdict.
+  4 on an operational error (missing database, unreadable context file, or
+  a report that cannot be written to stdout) so an infrastructure failure
+  can never be mistaken for a CORRECTED verdict. Operational failures NEVER
+  alias a verdict code.
 - ``ingest`` / ``verify-corpus`` / ``serve`` / ``audit-export``: 0 success,
   1 error.
+
+Output encoding: ``main()`` reconfigures stdout/stderr to UTF-8 (guarded by
+``hasattr``), so report bytes are deterministic regardless of the host
+locale or ``PYTHONIOENCODING`` — every report contains non-ASCII by
+construction (verdict em-dash, per-atom icons, ⟨…⟩ removal markers) and a
+legacy-locale stdout must neither crash a verify nor change its bytes.
 
 On-premise contract: ``serve`` binds loopback only and REFUSES any
 non-loopback ``--host`` with exit 1, *before* importing the API stack.
@@ -44,8 +52,9 @@ _VERDICT_EXIT: dict[Verdict, int] = {
     Verdict.UNVERIFIABLE: 3,
 }
 
-#: ``verify`` operational failure (missing db, unreadable context file) —
-#: distinct from every verdict code, so CI gates cannot misread it.
+#: ``verify`` operational failure (missing db, unreadable context file,
+#: report unwritable to stdout) — distinct from every verdict code, so CI
+#: gates cannot misread it.
 _EXIT_OPERATIONAL = 4
 
 #: Per-atom icons of the human report (the dossier_citations style).
@@ -59,7 +68,8 @@ _ICONS: dict[AtomStatus, str] = {
 _EXIT_CODES_EPILOG = """\
 exit codes:
   verify          0 VERIFIED / 1 CORRECTED / 2 INSUFFICIENT / 3 UNVERIFIABLE
-                  4 operational error (missing database, unreadable context file)
+                  4 operational error (missing database, unreadable context
+                  file, report unwritable to stdout)
   other commands  0 success / 1 error
 """
 
@@ -116,7 +126,7 @@ def _print_human_report(answer: str, report: Report) -> None:
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
     """Build the corpus; print counts + fingerprint + every skipped file
-    with its reason (never silent)."""
+    with its reason + every pruned document (never silent)."""
     try:
         result = Gate.ingest(
             args.folder, args.db, packs=args.packs, glossary_path=args.glossary
@@ -130,6 +140,8 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     print(f"fingerprint: {result.fingerprint}")
     for relpath, reason in result.skipped:
         print(f"skipped: {relpath} ({reason})")
+    for doc_id in result.pruned:
+        print(f"pruned: {doc_id} (no longer in folder)")
     return 0
 
 
@@ -158,10 +170,18 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     finally:
         gate.close()
 
-    if args.json:
-        print(report.to_json())
-    else:
-        _print_human_report(answer, report)
+    try:
+        if args.json:
+            print(report.to_json())
+        else:
+            _print_human_report(answer, report)
+        sys.stdout.flush()
+    except (OSError, UnicodeEncodeError) as exc:
+        # The report could not be written (stdout cannot encode it, closed
+        # pipe, disk full…): an I/O failure must NEVER alias a verdict exit
+        # code (D-010) — exit with the operational code instead.
+        print(f"error: cannot write the report to stdout: {exc}", file=sys.stderr)
+        return _EXIT_OPERATIONAL
     return _VERDICT_EXIT[report.verdict]
 
 
@@ -317,6 +337,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point (``verigate = verigate.cli:main``); returns the exit code."""
+    # Deterministic UTF-8 output regardless of host locale/PYTHONIOENCODING:
+    # the report bytes must not depend on the environment, and a legacy
+    # locale must not crash a verify into exit 1 (= CORRECTED, D-010).
+    # hasattr-guarded: test harnesses may substitute plain writers.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     args = _build_parser().parse_args(argv)
     return args.func(args)
 

@@ -1,15 +1,20 @@
 """Tests for the quote extractor and the glossary-entity extractor.
 
-All tests are deterministic and offline (no fixtures needed: both
-extractors are pure functions of their input).
+All tests are deterministic and offline (both extractors are pure functions
+of their input; the stray-quote end-to-end regression builds a throwaway
+CorpusDB in tmp_path).
 """
 
 from __future__ import annotations
 
+import hashlib
+
 from verigate.canonical import canonical_text
+from verigate.corpus import CorpusDB
 from verigate.extract.entities import EntityExtractor
 from verigate.extract.quotes import QuoteExtractor
-from verigate.types import AtomType
+from verigate.types import REMOVAL_MARKERS, AtomType, Verdict
+from verigate.verify.engine import Verifier
 
 GLOSSARY = [
     ("aquapump 3000", "AquaPump 3000"),
@@ -138,6 +143,99 @@ def test_quotes_deterministic():
     text = 'a "one two three" et « quatre cinq six » b'
     extractor = QuoteExtractor()
     assert extractor.extract(text) == extractor.extract(text)
+
+
+# ------------------------------------------- stray straight-quote regression
+#
+# A straight " is also the ASCII inch/second/ditto mark. Regression for the
+# review finding: a stray mark (6") mispaired with a genuine quote's opener,
+# so the innocent PROSE between them became the QUOTE atom (removed as
+# unverified) while the real quoted claim escaped verification. Conservative
+# contract: a mark glued to an alphanumeric can never OPEN, and an ODD count
+# of plausible straight delimiters disables straight-quote extraction
+# entirely (deleting innocent prose is strictly worse than leaving a quote
+# unchecked — D-003 spirit).
+
+STRAY_INCH_ANSWER = (
+    'The pipe is 6" wide. The manual says '
+    '"install the pump vertically for best results".'
+)
+
+
+def test_stray_inch_mark_extracts_no_straight_quote():
+    # 3 plausible straight delimiters (one stray closer + one real pair):
+    # odd count -> no straight-quote atom at all, never mispaired prose.
+    assert QuoteExtractor().extract(STRAY_INCH_ANSWER) == []
+
+
+def test_inch_mark_alone_cannot_open_a_quote():
+    # Glued to a digit, the mark can never OPEN: the prose after it must not
+    # become a quote even though a whitespace-preceded " would.
+    text = 'The pipe is 6" wide and very robust today.'
+    assert QuoteExtractor().extract(text) == []
+
+
+def test_lone_unattached_quote_is_not_a_delimiter():
+    # A " surrounded by spaces can neither open nor close: it does not count
+    # toward parity and must not poison a well-formed pair.
+    text = 'odd mark " here, then "three little words" follow.'
+    atoms = QuoteExtractor().extract(text)
+    assert [a.raw for a in atoms] == ['"three little words"']
+
+
+def test_even_inch_marks_do_not_block_a_real_quote():
+    # Two inch marks (both closer-plausible) keep the count even: the real
+    # pair is still extracted and the marks are never treated as openers.
+    text = 'Pipes of 6" and 8" exist. He said "the pump is great" today.'
+    atoms = QuoteExtractor().extract(text)
+    assert [a.raw for a in atoms] == ['"the pump is great"']
+
+
+def test_typographic_and_guillemets_unaffected_by_stray_straight():
+    # Layer (b) only disables STRAIGHT quotes: “…” and «…» keep extracting.
+    text = 'Tube 6" requis. Il dit « garantie de 24 mois » et “alpha beta gamma”.'
+    atoms = QuoteExtractor().extract(text)
+    assert [a.raw for a in atoms] == [
+        "« garantie de 24 mois »",
+        "“alpha beta gamma”",
+    ]
+
+
+def test_stray_inch_mark_regression_end_to_end(tmp_path):
+    """The report's exact repro: corpus-grounded quote + stray inch mark.
+
+    Before the fix the verifier returned corrected_answer
+    'The pipe is 6⟨unverified quote, removed⟩install the pump …".' —
+    innocent prose deleted, genuine quote left unchecked with a dangling ".
+    After the fix the answer must pass through untouched (no quote atom).
+    """
+    doc_text = "Mounting: install the pump vertically for best results."
+    db = CorpusDB(tmp_path / "corpus.db", create=True)
+    db.add_document(
+        "products",
+        "products.md",
+        doc_text,
+        hashlib.sha256(doc_text.encode("utf-8")).hexdigest(),
+    )
+    db.finalize_manifest()
+    verifier = Verifier(db)
+
+    rep = verifier.verify(STRAY_INCH_ANSWER)
+    assert rep.corrected_answer == STRAY_INCH_ANSWER
+    assert REMOVAL_MARKERS[AtomType.QUOTE] not in rep.corrected_answer
+    assert not any(r.atom.type is AtomType.QUOTE for r in rep.atoms)
+    # The innocent prose the bug used to delete is intact.
+    assert ' wide. The manual says ' in rep.corrected_answer
+    assert "install the pump vertically for best results" in rep.corrected_answer
+
+    # Control: without the stray mark the same quote is extracted and
+    # VERIFIED — the guard did not neuter straight-quote checking.
+    control = 'The manual says "install the pump vertically for best results".'
+    rep2 = verifier.verify(control)
+    quotes = [r for r in rep2.atoms if r.atom.type is AtomType.QUOTE]
+    assert len(quotes) == 1
+    assert rep2.verdict is Verdict.VERIFIED
+    db.close()
 
 
 # --------------------------------------------------------------- entities

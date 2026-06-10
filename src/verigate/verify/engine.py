@@ -42,6 +42,7 @@ from verigate.extract.quotes import QuoteExtractor
 from verigate.extract.references import ReferenceExtractor, builtin_pack_names, load_pack
 from verigate.types import (
     FALSE_STATUSES,
+    REMOVAL_MARKERS,
     Atom,
     AtomResult,
     AtomStatus,
@@ -55,6 +56,10 @@ _WARN_EMPTY = "empty answer"
 _WARN_NOTHING_CHECKABLE = (
     "No verifiable atoms found; nothing in this answer could be checked "
     "against the corpus."
+)
+_WARN_INPUT_MARKER = (
+    "input already contained a VeriGate removal marker; "
+    "markers in corrected_answer are not all VeriGate-issued"
 )
 _DETAIL_REF_NOT_FOUND = "reference not found in trusted corpus"
 _DETAIL_NUMBER_NOT_FOUND = "number not found in trusted corpus"
@@ -107,6 +112,9 @@ class Verifier:
 
         Returns a :class:`Report` whose atoms are sorted by (start, end) and
         whose serialization is byte-identical for identical inputs (D-006).
+        If the input itself already contains a removal marker (D-005), the
+        report carries a warning: markers in ``corrected_answer`` are then
+        not all VeriGate-issued.
         """
         answer_sha = hashlib.sha256(answer.encode("utf-8")).hexdigest()
         fingerprint = self.corpus.fingerprint()
@@ -121,6 +129,16 @@ class Verifier:
                 corpus_fingerprint=fingerprint,
                 warnings=[_WARN_EMPTY],
             )
+
+        # Provenance guard: the removal marker is VeriGate's honesty signal
+        # (D-005 — "marker present" must mean "VeriGate removed a false atom
+        # here"). If the INPUT already carries one, it flows through to
+        # corrected_answer untouched, so downstream consumers scanning for
+        # markers could mistake it for a VeriGate redaction. Warn so the
+        # report stays honest about marker provenance.
+        warnings: list[str] = []
+        if any(marker in answer for marker in REMOVAL_MARKERS.values()):
+            warnings.append(_WARN_INPUT_MARKER)
 
         # Fixed extractor order, then GLOBAL dedupe: cross-extractor overlaps
         # collapse to the longest span (a quote swallows the SKU it cites —
@@ -156,7 +174,6 @@ class Verifier:
 
         # D-002: the Beaume gradation — zero checkable atoms is UNVERIFIABLE
         # with score 0.0, never a vacuous 100%.
-        warnings: list[str] = []
         if checkable == 0:
             verdict = Verdict.UNVERIFIABLE
             warnings.append(_WARN_NOTHING_CHECKABLE)

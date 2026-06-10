@@ -32,7 +32,15 @@ CTX_CHUNK = "Approved spare parts list: GR-77-X9 is certified."
 CSV_HEADER = '"Date";"Action";"User";"Justification";"PrevHash";"Signature";"Sequence"'
 
 HEALTH_KEYS = {"status", "version", "corpus_fingerprint", "documents"}
-INGEST_KEYS = {"n_docs", "n_refs", "n_numbers", "n_entities", "fingerprint", "skipped"}
+INGEST_KEYS = {
+    "n_docs",
+    "n_refs",
+    "n_numbers",
+    "n_entities",
+    "fingerprint",
+    "skipped",
+    "pruned",
+}
 
 
 def _canon(data: dict) -> str:
@@ -192,8 +200,11 @@ def test_ingest_then_verify_sees_new_docs(client, tmp_path):
     resp = client.post("/ingest", json={"folder": str(folder)})
     body = resp.json()
     assert resp.status_code == 200
-    assert body["n_docs"] == 4  # 3 sample docs + valves.md, same database
+    # D-011: the folder IS the corpus — valves.md only, the 3 sample docs
+    # are pruned (explicitly reported), never silently retained.
+    assert body["n_docs"] == 1
     assert body["skipped"] == []
+    assert body["pruned"] == ["catalog.md", "policy.txt", "products.csv"]
 
     # The app's Gate must see the NEW corpus content: entity (glossary
     # snapshot), reference and price all come from the just-ingested doc.
@@ -238,9 +249,12 @@ def test_ingest_missing_folder_field_422(client):
 
 def test_ingest_updates_health(client, tmp_path):
     before = client.get("/health").json()
+    assert before["documents"] == 3
     client.post("/ingest", json={"folder": str(_new_docs_folder(tmp_path))})
     after = client.get("/health").json()
-    assert after["documents"] == before["documents"] + 1
+    # D-011: the ingested folder replaces the corpus content (1 doc), the
+    # previous documents are pruned, and the fingerprint reflects it.
+    assert after["documents"] == 1
     assert after["corpus_fingerprint"] != before["corpus_fingerprint"]
 
 
