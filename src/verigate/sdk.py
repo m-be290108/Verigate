@@ -44,8 +44,14 @@ class Gate:
         corpus_db: str | Path,
         audit_db: str | Path | None = None,
         config: VerifyConfig | None = None,
+        check_same_thread: bool = True,
     ) -> None:
-        self._corpus = CorpusDB(corpus_db)
+        # `check_same_thread` is forwarded to :class:`CorpusDB` (and from
+        # there to sqlite3.connect). The default keeps sqlite3's own
+        # thread-affinity guard; the API layer passes False and serializes
+        # every Gate use with one lock (see verigate.api.app). AuditTrail
+        # already carries its own internal lock and needs no forwarding.
+        self._corpus = CorpusDB(corpus_db, check_same_thread=check_same_thread)
         self._verifier = Verifier(self._corpus, config)
         self._audit: AuditTrail | None = (
             AuditTrail(audit_db) if audit_db is not None else None

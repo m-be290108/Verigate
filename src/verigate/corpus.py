@@ -95,18 +95,28 @@ class CorpusDB:
     doc_id wins) so the same database always yields the same answers.
     """
 
-    def __init__(self, path: str | Path, create: bool = False):
+    def __init__(
+        self, path: str | Path, create: bool = False, check_same_thread: bool = True
+    ):
         """Open (or create) the corpus database at `path`.
 
         With ``create=True`` the schema is applied (idempotent). With
         ``create=False`` a missing file raises FileNotFoundError instead of
         letting sqlite3 silently create an empty database.
+
+        `check_same_thread` is forwarded verbatim to :func:`sqlite3.connect`.
+        The default (True) keeps sqlite3's own thread-affinity guard; a
+        caller passing False takes responsibility for serializing EVERY use
+        of this instance externally (the API layer does exactly that with
+        one app-wide lock — see :mod:`verigate.api.app`).
         """
         path = Path(path)
         if not create and not path.exists():
             raise FileNotFoundError(f"corpus database not found: {path}")
         # isolation_level=None -> autocommit; transactions are explicit.
-        self._conn = sqlite3.connect(str(path), isolation_level=None)
+        self._conn = sqlite3.connect(
+            str(path), isolation_level=None, check_same_thread=check_same_thread
+        )
         if create:
             self._conn.executescript(_SCHEMA)
 
