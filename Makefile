@@ -3,6 +3,10 @@ VENV   := .venv
 PIP    := $(VENV)/bin/pip
 PY     := $(VENV)/bin/python
 
+# Belt-and-braces against macOS UF_HIDDEN on .pth files (site.py skips hidden
+# .pth, silently breaking the editable install — seen 2026-06-10).
+export PYTHONPATH := src
+
 .PHONY: venv install test lint bench-quick verify clean
 
 venv:
