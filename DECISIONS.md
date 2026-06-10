@@ -64,3 +64,10 @@ export.
 Core = stdlib + PyYAML (packs). FastAPI/uvicorn and pypdf/python-docx are
 optional extras (`[api]`, `[ingest]`). A client can run the verification
 engine with nothing but Python 3.11 + PyYAML — an on-premise selling point.
+
+## D-010 — CLI exit codes mirror the verdict gradation
+`verigate verify` exits 0 VERIFIED / 1 CORRECTED / 2 INSUFFICIENT /
+3 UNVERIFIABLE, so shell pipelines and CI gates can branch on the verdict
+without parsing output. `ingest`/`verify-corpus`/`audit-export` use 0/1.
+`serve` refuses non-loopback hosts (on-premise contract: localhost by
+default, rebinding is a deliberate customer decision, not a flag typo).
