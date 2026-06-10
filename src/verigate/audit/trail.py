@@ -32,6 +32,7 @@ import secrets
 import sqlite3
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +86,39 @@ def _read_private_file(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _create_private_exclusive(path: Path, payload: bytes) -> bytes:
+    """Create `path` with `payload`, atomically AND exclusively (mode 0600).
+
+    mkstemp + os.link gives both properties at once: the payload is fully
+    written to a private tmpfile first, so a crash never leaves a torn or
+    world-readable file at `path`; and the hard link fails with
+    FileExistsError when `path` already exists, so exactly ONE of any
+    number of concurrent first-time creators wins (O_CREAT|O_EXCL
+    semantics, without the torn-file window of a direct exclusive write).
+
+    Returns the bytes that actually live at `path` afterwards: the
+    caller's payload if this call won the race, the winner's bytes if it
+    lost. A loser MUST use the returned bytes — keeping its own would
+    mean (for the HMAC secret) signing rows with a key that exists
+    nowhere on disk, making the chain unverifiable after a restart.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        try:
+            os.fchmod(fd, _PRIVATE_MODE)
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return _read_private_file(path)
+        return payload
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
 class PiiPseudonymizer:
     """Deterministic HMAC-SHA256 pseudonymization (ported as-is from Beaume).
 
@@ -99,9 +133,10 @@ class PiiPseudonymizer:
     def _load_or_create_salt(self) -> bytes:
         if self._salt_path.exists():
             return _read_private_file(self._salt_path)
-        salt = secrets.token_bytes(32)
-        _atomic_write_private(self._salt_path, salt)
-        return salt
+        # Exclusive create: two instances racing first-time creation must
+        # converge on ONE persisted salt, or pseudonyms silently diverge
+        # per instance. The loser adopts the winner's bytes.
+        return _create_private_exclusive(self._salt_path, secrets.token_bytes(32))
 
     def pseudonymize(self, value: str) -> str:
         """Return a stable ``pii:`` + 16-hex-char pseudonym for `value`."""
@@ -193,7 +228,20 @@ class AuditTrail:
         self._conn = sqlite3.connect(
             str(self._db_path), isolation_level=None, check_same_thread=False
         )
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        # Switching to WAL needs a brief exclusive lock, and SQLite does not
+        # route this particular conflict through the busy handler: two
+        # instances constructed concurrently on the same fresh db can hit
+        # 'database is locked' immediately instead of waiting. The journal
+        # mode is persistent in the db header, so once ANY racer succeeds
+        # the retry merely confirms 'wal'. Bounded retry, then fail loudly.
+        for attempt in range(20):
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or attempt == 19:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute(
             """
@@ -224,9 +272,16 @@ class AuditTrail:
         path = self._secret_path()
         if path.exists():
             return _read_private_file(path)
-        secret = secrets.token_bytes(32)
-        _atomic_write_private(path, secret)
-        logger.info("Audit HMAC secret generated and persisted: %s", path)
+        # Exclusive create: when two instances race first-time creation on
+        # the same fresh db_path, both must end up signing with the SAME
+        # persisted secret. The old exists()->generate->write sequence was
+        # last-writer-wins (os.replace): the racer whose write lost kept
+        # signing with an in-memory secret that no longer existed on disk,
+        # so verify_chain() reported 'Signature mismatch' on its rows after
+        # any restart. With the exclusive create, a loser adopts the
+        # winner's bytes before signing anything.
+        secret = _create_private_exclusive(path, secrets.token_bytes(32))
+        logger.info("Audit HMAC secret persisted: %s", path)
         return secret
 
     def _write_anchor(self, sequence: int, signature: str) -> None:
@@ -328,6 +383,11 @@ class AuditTrail:
                     with contextlib.suppress(sqlite3.Error):
                         self._conn.execute("ROLLBACK")
             # Anchor updated after commit, still under the lock (F14-c).
+            # If THIS write fails, the row is already durably committed and
+            # the anchor is left lagging one row behind; verify_chain()
+            # recognizes that exact state (lagging anchor + intact forward
+            # chain) and self-reconciles instead of raising a false
+            # truncation alarm.
             self._write_anchor(entry.sequence, entry.signature)
         return entry
 
@@ -341,8 +401,31 @@ class AuditTrail:
         Checks, in order: prev_hash linkage (first row must point at
         GENESIS), sequence gaps, the HMAC of every row, then the out-of-DB
         anchor (F14-c). An absent anchor is not an error — legacy/new DB.
+
+        Lagging-anchor self-reconciliation: record() COMMITs the row BEFORE
+        it writes the anchor, so an I/O failure between the two (disk full,
+        read-only dir, crash) leaves the anchor pinning sequence N while
+        the table legitimately ends at N+k. That state is distinguishable
+        from tampering: a delete-the-tail attack leaves the table BEHIND
+        the anchor (never ahead of it), and forging rows past the anchor
+        requires the HMAC secret. So when the anchor lags strictly behind
+        the last row, its (sequence, signature) matches the genuine row it
+        was written for, and every row from there to the end verifies
+        cleanly, the chain is VALID and the anchor is atomically re-pinned
+        to the true last row. Any other divergence (forged anchor
+        signature, broken forward chain, anchor ahead of the table) stays
+        a hard truncation/tamper error.
         """
         errors: list[str] = []
+        bad_seqs: set[int] = set()
+
+        def flag(seq: int, message: str) -> None:
+            bad_seqs.add(int(seq))
+            errors.append(message)
+
+        # The whole verification runs under the lock so the lagging-anchor
+        # re-pin below cannot race a concurrent record(): re-writing the
+        # anchor from a stale snapshot would regress a newer anchor.
         with self._lock:
             rows = self._conn.execute(
                 "SELECT sequence, timestamp, action, user, justification,"
@@ -350,55 +433,107 @@ class AuditTrail:
                 " FROM audit_entries ORDER BY sequence"
             ).fetchall()
 
-        prev_sig = _GENESIS
-        expected_seq = 1
-        for seq, ts, action, user, just, data_json, prev_hash, sig in rows:
-            if seq != expected_seq:
-                errors.append(f"Sequence gap: expected {expected_seq}, got {seq}")
-            if prev_hash != prev_sig:
-                errors.append(
-                    f"Hash chain break at sequence {seq}: "
-                    f"expected prev_hash={prev_sig!r}, got {prev_hash!r}"
-                )
-            try:
-                data = json.loads(data_json)
-            except json.JSONDecodeError as exc:
-                errors.append(f"Unparseable data_json at sequence {seq}: {exc}")
-            else:
-                entry = AuditEntry(
-                    sequence=seq,
-                    timestamp=ts,
-                    action=action,
-                    user=user,
-                    justification=just,
-                    data=data,
-                    prev_hash=prev_hash,
-                )
-                if sig != entry.compute_signature(self._secret):
-                    errors.append(f"Signature mismatch at sequence {seq}")
-            prev_sig = sig
-            expected_seq = seq + 1
-
-        try:
-            anchor = self._read_anchor()
-        except ValueError as exc:
-            errors.append(str(exc))
-            anchor = None
-        if anchor is not None:
-            if not rows:
-                errors.append(
-                    "Truncation detected: anchor at sequence="
-                    f"{anchor['sequence']} but audit table is empty"
-                )
-            else:
-                last_seq, last_sig = rows[-1][0], rows[-1][7]
-                if int(last_seq) != anchor["sequence"] or str(last_sig) != anchor["signature"]:
-                    errors.append(
-                        "Truncation detected: expected last entry sequence="
-                        f"{anchor['sequence']}, found sequence={last_seq}"
+            prev_sig = _GENESIS
+            expected_seq = 1
+            sig_by_seq: dict[int, str] = {}
+            for seq, ts, action, user, just, data_json, prev_hash, sig in rows:
+                sig_by_seq[int(seq)] = str(sig)
+                if seq != expected_seq:
+                    flag(seq, f"Sequence gap: expected {expected_seq}, got {seq}")
+                if prev_hash != prev_sig:
+                    flag(
+                        seq,
+                        f"Hash chain break at sequence {seq}: "
+                        f"expected prev_hash={prev_sig!r}, got {prev_hash!r}",
                     )
+                try:
+                    data = json.loads(data_json)
+                except json.JSONDecodeError as exc:
+                    flag(seq, f"Unparseable data_json at sequence {seq}: {exc}")
+                else:
+                    entry = AuditEntry(
+                        sequence=seq,
+                        timestamp=ts,
+                        action=action,
+                        user=user,
+                        justification=just,
+                        data=data,
+                        prev_hash=prev_hash,
+                    )
+                    if sig != entry.compute_signature(self._secret):
+                        flag(seq, f"Signature mismatch at sequence {seq}")
+                prev_sig = sig
+                expected_seq = seq + 1
+
+            try:
+                anchor = self._read_anchor()
+            except ValueError as exc:
+                errors.append(str(exc))
+                anchor = None
+            if anchor is not None:
+                if not rows:
+                    errors.append(
+                        "Truncation detected: anchor at sequence="
+                        f"{anchor['sequence']} but audit table is empty"
+                    )
+                else:
+                    last_seq, last_sig = int(rows[-1][0]), str(rows[-1][7])
+                    a_seq, a_sig = anchor["sequence"], anchor["signature"]
+                    if last_seq == a_seq and last_sig == a_sig:
+                        pass  # anchor pins the last row exactly — nominal
+                    elif self._anchor_lag_is_benign(
+                        a_seq, a_sig, last_seq, sig_by_seq, bad_seqs
+                    ):
+                        # Crashed anchor write, not tampering. Re-pin to
+                        # the true last row — but only on an otherwise
+                        # clean chain: an audit verification must never
+                        # mutate state while it is reporting a failure.
+                        # Best-effort: if the re-pin itself fails (the
+                        # disk may still be full), the chain is still
+                        # valid and the next verification retries.
+                        if not errors:
+                            try:
+                                self._write_anchor(last_seq, last_sig)
+                            except OSError:
+                                logger.warning(
+                                    "Lagging audit anchor is consistent but"
+                                    " could not be re-pinned to sequence %d —"
+                                    " will retry on the next verification",
+                                    last_seq,
+                                )
+                    else:
+                        errors.append(
+                            "Truncation detected: expected last entry sequence="
+                            f"{a_seq}, found sequence={last_seq}"
+                        )
 
         return len(errors) == 0, errors
+
+    @staticmethod
+    def _anchor_lag_is_benign(
+        a_seq: int,
+        a_sig: str,
+        last_seq: int,
+        sig_by_seq: dict[int, str],
+        bad_seqs: set[int],
+    ) -> bool:
+        """True iff a non-matching anchor is explained by a crashed anchor
+        write rather than tampering.
+
+        Three conditions, all required:
+        - the anchor lags STRICTLY behind the table (a truncation attack
+          leaves the table behind the anchor, never ahead of it);
+        - the anchor's (sequence, signature) matches the genuine row it
+          was written for (a forged/garbage anchor fails here);
+        - every row from the anchored one to the end verified cleanly —
+          no gap, no linkage break, no HMAC mismatch (appending rows
+          without the secret fails here).
+        """
+        if a_seq >= last_seq:
+            return False
+        if sig_by_seq.get(a_seq) != a_sig:
+            return False
+        return all(seq not in bad_seqs for seq in range(a_seq, last_seq + 1))
 
     # ------------------------------------------------------------------
     # CSV export
