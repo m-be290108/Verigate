@@ -226,7 +226,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             f"(pip install 'verigate[api]'): {exc}"
         )
     try:
-        app = create_app(args.db, audit_db=args.audit_db)
+        app = create_app(args.db, audit_db=args.audit_db, cache_size=args.cache_size)
     except FileNotFoundError as exc:
         return _fail(str(exc))
     uvicorn.run(app, host=args.host, port=args.port)
@@ -322,6 +322,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--host",
         default="127.0.0.1",
         help="bind address — loopback only (non-loopback hosts are refused)",
+    )
+    p.add_argument(
+        "--cache-size",
+        type=int,
+        default=0,
+        help="LRU report cache size, 0 = disabled (D-014: identical "
+        "(answer, context) pairs are served from cache; audit entries are "
+        "still recorded per call)",
     )
     p.set_defaults(func=_cmd_serve)
 

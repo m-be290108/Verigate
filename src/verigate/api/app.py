@@ -80,6 +80,7 @@ def create_app(
     corpus_db: str | Path,
     audit_db: str | Path | None = None,
     config: VerifyConfig | None = None,
+    cache_size: int = 0,
 ) -> FastAPI:
     """Build the FastAPI app over one :class:`Gate` opened on `corpus_db`.
 
@@ -88,7 +89,9 @@ def create_app(
     command relies on this), and closed by the lifespan handler on
     shutdown. With `audit_db` set, every ``POST /verify`` is journaled in
     the tamper-evident audit trail and ``GET /audit/export`` serves the
-    verified CSV export.
+    verified CSV export. `cache_size` enables the Gate's opt-in LRU report
+    cache (D-014) — repeats of the same (answer, context) skip the engine;
+    audit entries are still recorded per call.
     """
     corpus_path = Path(corpus_db)
     audit_path = Path(audit_db) if audit_db is not None else None
@@ -113,7 +116,11 @@ def create_app(
     # serializes EVERY Gate use: it is what makes the relaxed thread guard
     # safe, and it makes the ingest-time reopen-and-swap atomic.
     app.state.gate = Gate(
-        corpus_path, audit_db=audit_path, config=config, check_same_thread=False
+        corpus_path,
+        audit_db=audit_path,
+        config=config,
+        check_same_thread=False,
+        cache_size=cache_size,
     )
     app.state.lock = threading.Lock()
 
@@ -154,8 +161,14 @@ def create_app(
             # Reopen: the Verifier's glossary snapshot is taken at
             # construction; lookups must see the documents just ingested.
             # Same check_same_thread=False + lock discipline as create_app.
+            # The fresh Gate also restarts the report cache: cached reports
+            # were rendered against the pre-ingest corpus fingerprint.
             new_gate = Gate(
-                corpus_path, audit_db=audit_path, config=config, check_same_thread=False
+                corpus_path,
+                audit_db=audit_path,
+                config=config,
+                check_same_thread=False,
+                cache_size=cache_size,
             )
             app.state.gate.close()
             app.state.gate = new_gate

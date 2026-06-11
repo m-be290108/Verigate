@@ -139,10 +139,27 @@ the corpus), so the figure measures detection of *absent* values only; it
 cannot and does not measure cross-attribution errors (a real corpus value
 attributed to the wrong subject — see limitations above).
 
+## Latency
+
+Verification is pure regex + indexed SQLite lookups — it adds nothing a
+user can feel next to LLM generation time (measured on an M-series Mac):
+
+| Scenario | Latency |
+|---|---|
+| `verify()`, 3-document corpus | ~0.2 ms / call |
+| `verify()`, 400-product catalog (quotes included) | ~2.5 ms / call |
+| Repeat answer with the opt-in LRU cache (`Gate(..., cache_size=1024)`) | ~0.02 ms / call |
+| Ingest (one-off per corpus update), 400 products | ~1 s |
+
+The cache is safe *because* verification is deterministic: for a fixed
+corpus, (answer, context) fully determines the report, byte for byte
+(D-014). Cache hits still write their audit entry — the journal records
+events, not computations.
+
 ## Compliance
 
 - **Deterministic**: no LLM judge, no temperature, no drift. Same inputs,
-  same bytes. 360 tests, zero network (enforced by a socket-guard test).
+  same bytes. 366 tests, zero network (enforced by a socket-guard test).
 - **On-premise**: your data never leaves. The API binds localhost; there is
   no telemetry, no cloud, no outbound call anywhere in the codebase.
 - **Tamper-evident audit trail**: every verification is journaled (answer

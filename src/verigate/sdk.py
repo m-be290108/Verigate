@@ -21,6 +21,8 @@ data.
 
 from __future__ import annotations
 
+import copy
+from collections import OrderedDict
 from pathlib import Path
 
 from verigate.audit.trail import AuditTrail
@@ -45,6 +47,7 @@ class Gate:
         audit_db: str | Path | None = None,
         config: VerifyConfig | None = None,
         check_same_thread: bool = True,
+        cache_size: int = 0,
     ) -> None:
         # `check_same_thread` is forwarded to :class:`CorpusDB` (and from
         # there to sqlite3.connect). The default keeps sqlite3's own
@@ -56,6 +59,11 @@ class Gate:
         self._audit: AuditTrail | None = (
             AuditTrail(audit_db) if audit_db is not None else None
         )
+        # Opt-in memoization (D-014): determinism makes (answer, context) a
+        # complete cache key for a given Gate — the corpus is fixed for the
+        # instance's lifetime. cache_size=0 (default) disables it.
+        self._cache_size = max(0, int(cache_size))
+        self._cache: OrderedDict[tuple[str, tuple[str, ...]], Report] = OrderedDict()
 
     # ------------------------------------------------------------------ #
     # Verification
@@ -72,8 +80,26 @@ class Gate:
         see module docstring): verdict, score, number of false atoms, the
         sorted canonical keys of the rejected (false) atoms, and the corpus
         fingerprint the verdict was rendered against.
+
+        With ``cache_size > 0``, repeated (answer, context) pairs are served
+        from an LRU cache — byte-identical by determinism (D-014). A cache
+        hit is still a verification EVENT: the audit entry is recorded on
+        every call, hit or miss (the journal logs events, not computations).
         """
-        report = self._verifier.verify(answer, context)
+        key = (answer, tuple(context or ()))
+        cached = self._cache.get(key) if self._cache_size else None
+        if cached is not None:
+            self._cache.move_to_end(key)
+            # Deep copy so a caller mutating the returned report cannot
+            # poison the cache (reports are plain mutable dataclasses).
+            report = copy.deepcopy(cached)
+        else:
+            report = self._verifier.verify(answer, context)
+            if self._cache_size:
+                self._cache[key] = copy.deepcopy(report)
+                self._cache.move_to_end(key)
+                while len(self._cache) > self._cache_size:
+                    self._cache.popitem(last=False)
         if self._audit is not None:
             rejected = sorted(
                 {r.atom.canonical for r in report.atoms if r.status in FALSE_STATUSES}

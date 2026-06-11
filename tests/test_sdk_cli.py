@@ -509,3 +509,80 @@ def test_cli_serve_refuses_non_loopback_host(corpus_db, capsys, host):
     assert rc == 1
     assert "localhost only" in captured.err
     assert host in captured.err
+
+
+# ----------------------------------------------------------------- cache
+
+
+class TestReportCache:
+    """Opt-in LRU report cache (D-014) — possible because verify() is
+    deterministic: (answer, context) fully determines the report for a
+    given corpus."""
+
+    def test_cache_disabled_by_default(self, corpus_db, monkeypatch):
+        gate = Gate(corpus_db)
+        calls = []
+        real = gate._verifier.verify
+        monkeypatch.setattr(
+            gate._verifier, "verify", lambda a, c=None: calls.append(a) or real(a, c)
+        )
+        gate.verify(VERIFIED_ANSWER)
+        gate.verify(VERIFIED_ANSWER)
+        assert len(calls) == 2
+        gate.close()
+
+    def test_cache_hit_is_byte_identical_and_skips_engine(
+        self, corpus_db, monkeypatch
+    ):
+        gate = Gate(corpus_db, cache_size=8)
+        first = gate.verify(VERIFIED_ANSWER)
+        calls = []
+        real = gate._verifier.verify
+        monkeypatch.setattr(
+            gate._verifier, "verify", lambda a, c=None: calls.append(a) or real(a, c)
+        )
+        second = gate.verify(VERIFIED_ANSWER)
+        assert calls == []
+        assert second.to_json() == first.to_json()
+        gate.close()
+
+    def test_context_is_part_of_the_key(self, corpus_db):
+        gate = Gate(corpus_db, cache_size=8)
+        without_ctx = gate.verify(CTX_ANSWER)
+        with_ctx = gate.verify(CTX_ANSWER, context=[CTX_CHUNK])
+        assert without_ctx.verdict != with_ctx.verdict  # not served from cache
+        gate.close()
+
+    def test_lru_eviction(self, corpus_db, monkeypatch):
+        gate = Gate(corpus_db, cache_size=1)
+        gate.verify(VERIFIED_ANSWER)
+        gate.verify(CORRECTED_ANSWER)  # evicts VERIFIED_ANSWER
+        calls = []
+        real = gate._verifier.verify
+        monkeypatch.setattr(
+            gate._verifier, "verify", lambda a, c=None: calls.append(a) or real(a, c)
+        )
+        gate.verify(VERIFIED_ANSWER)
+        assert calls == [VERIFIED_ANSWER]
+        gate.close()
+
+    def test_cache_hits_still_journal_audit_entries(self, corpus_db, tmp_path):
+        audit_db = tmp_path / "audit.db"
+        gate = Gate(corpus_db, audit_db=audit_db, cache_size=8)
+        gate.verify(VERIFIED_ANSWER)
+        gate.verify(VERIFIED_ANSWER)  # cache hit — still an event
+        gate.verify(VERIFIED_ANSWER)  # cache hit — still an event
+        assert gate._audit is not None
+        assert gate._audit.entry_count() == 3
+        valid, errors = gate._audit.verify_chain()
+        assert valid, errors
+        gate.close()
+
+    def test_mutating_a_returned_report_does_not_poison_the_cache(self, corpus_db):
+        gate = Gate(corpus_db, cache_size=8)
+        first = gate.verify(VERIFIED_ANSWER)
+        pristine = first.to_json()
+        first.warnings.append("mutated by caller")
+        second = gate.verify(VERIFIED_ANSWER)
+        assert second.to_json() == pristine
+        gate.close()

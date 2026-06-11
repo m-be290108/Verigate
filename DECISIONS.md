@@ -97,3 +97,15 @@ the README limitations and the bench caveat (whose injected lies are novel
 by construction and thus cannot measure this failure mode). Rejected:
 claiming "catches wrong prices" unqualified — that was an overclaim
 (2026-06-10 review finding, HIGH).
+
+## D-014 — Opt-in LRU report cache, audit still per-event
+`Gate(cache_size=N)` / `create_app(cache_size=N)` / `serve --cache-size N`
+memoize reports keyed on (answer, context tuple) — sound because for a
+fixed corpus the report is a pure function of that key (D-006), proven
+byte-identical by test. Cache hits are deep-copied out (a caller mutating a
+report must not poison the cache) and STILL journal an audit entry: the
+trail records verification events, not engine computations. Default 0
+(disabled): measured engine latency is ~0.2–2.5 ms/call, so the cache is a
+high-QPS/FAQ optimization, not a default need. The API's post-ingest Gate
+swap restarts the cache (old reports were rendered against the old
+fingerprint).
