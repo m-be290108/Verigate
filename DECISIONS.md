@@ -126,3 +126,18 @@ the run and still lands in the MISMATCHED ratio path. Trade-off accepted:
 an abbreviation shared by several entries verifies against the first in
 sorted order — membership, not association (D-013), unchanged. Rejected:
 keeping MISMATCHED for abbreviations (deletes correct product names).
+
+## D-016 — Money-semantic CSV columns index as money:EUR without a € sign
+Real-data eval: an ERP-style corpus with bare decimal price columns drove
+the false-positive rate to 56.9% — answers say "12,34 €" (atom
+``money:EUR:12.34``) but the corpus only indexed ``decimal:12.34``, so
+every priced answer was mutilated. A CSV column whose header contains
+price/prix/cost/montant as a substring, or eur/euro/euros as a whole token
+(substring would catch 'couleur'/'valeur'), now ALSO indexes each
+parseable cell as a money:EUR atom; $/£ cells are excluded (explicit
+non-EUR currency). French all-comma amounts ("3,284,71", systematic in
+BDPM exports ≥ 1000 €) parse via `canonical_number`: several commas with a
+2-digit last group → the last comma is the decimal mark. Cells that do not
+parse cleanly ('N/A', free text) are skipped, never indexed as garbage.
+Rejected: rewriting cell values in the rendered text (the extractors must
+see the verbatim source, and a mangled render would "verify" garbage).

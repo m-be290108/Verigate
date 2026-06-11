@@ -432,6 +432,105 @@ def test_csv_name_column_entity_word_count_gate(tmp_path):
         assert db.has_entity(seven_words) is None
 
 
+def test_csv_money_column_bare_decimals_index_as_money(tmp_path):
+    # Real-data eval: ERP exports carry bare decimal prices (no € sign) —
+    # without money:EUR indexing, every priced answer was a false positive
+    # (56.9% of answers mutilated on such a corpus). D-016.
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "products.csv").write_text(
+        "sku,name,price_eur\nAP-3000-X,AquaPump 3000,249.99\n"
+        "HF-MINI-2,HydroFilter Mini,39.50\n",
+        encoding="utf-8",
+    )
+    _, db_path = _ingest(folder, tmp_path)
+    with CorpusDB(db_path) as db:
+        assert db.has_number("money:EUR:249.99", kind="money") == "products.csv"
+        assert db.has_number("money:EUR:39.5", kind="money") == "products.csv"
+        # The verbatim rendering still indexes the bare decimal too.
+        assert db.has_number("decimal:249.99", kind="decimal") == "products.csv"
+
+
+def test_csv_money_column_french_multi_comma_amounts(tmp_path):
+    # BDPM-style '3,284,71' (thousands commas + decimal comma): quoted in
+    # the CSV, parsed cell-wise via canonical_number.
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "tarifs.csv").write_text(
+        'code,libelle,Prix public TTC\nC1,Produit Alpha,"3,284,71"\n'
+        'C2,Produit Beta,"12,50"\n',
+        encoding="utf-8",
+    )
+    _, db_path = _ingest(folder, tmp_path)
+    with CorpusDB(db_path) as db:
+        assert db.has_number("money:EUR:3284.71", kind="money") == "tarifs.csv"
+        assert db.has_number("money:EUR:12.5", kind="money") == "tarifs.csv"
+
+
+def test_csv_money_header_detection_token_vs_substring(tmp_path):
+    # 'montant_ht' (substring) and 'total_eur' (whole token) are money;
+    # 'couleur' and 'valeur' contain 'eur' only as a substring — NOT money.
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "data.csv").write_text(
+        "ref,montant_ht,total_eur,couleur,valeur\nX1,100.10,200.20,300.30,400.40\n",
+        encoding="utf-8",
+    )
+    _, db_path = _ingest(folder, tmp_path)
+    with CorpusDB(db_path) as db:
+        assert db.has_number("money:EUR:100.1", kind="money") == "data.csv"
+        assert db.has_number("money:EUR:200.2", kind="money") == "data.csv"
+        assert db.has_number("money:EUR:300.3", kind="money") is None
+        assert db.has_number("money:EUR:400.4", kind="money") is None
+
+
+def test_csv_money_unparseable_cells_are_skipped_not_indexed(tmp_path):
+    # 'N/A', empty, free text, and $-amounts never become money:EUR atoms.
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "p.csv").write_text(
+        "name,price\nAlpha,N/A\nBeta,\nGamma,sur devis\nDelta,$5.00\nEpsilon,8 €\n",
+        encoding="utf-8",
+    )
+    _, db_path = _ingest(folder, tmp_path)
+    with CorpusDB(db_path) as db:
+        assert db.has_number("money:EUR:8", kind="money") == "p.csv"  # € stripped
+        assert db.has_number("money:EUR:5", kind="money") is None  # $ is not EUR
+        rows = db._conn.execute(
+            "SELECT raw FROM numbers WHERE kind = 'money' AND doc_id = 'p.csv'"
+        ).fetchall()
+        assert all("N/A" not in r[0] and "devis" not in r[0] for r in rows)
+
+
+def test_e2e_bare_decimal_price_answer_verifies(tmp_path):
+    # End-to-end regression for the 56.9% FP scenario: corpus = ERP-style
+    # CSV with bare decimal prices; the answer states the price with a €
+    # sign and must verify.
+    from verigate.verify.engine import Verifier
+
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "products.csv").write_text(
+        'name,prix\nProduit Alpha,"3,284,71"\nProduit Beta,12.34\n',
+        encoding="utf-8",
+    )
+    _, db_path = _ingest(folder, tmp_path)
+    with CorpusDB(db_path) as db:
+        rep = Verifier(db).verify("Le Produit Beta coûte 12,34 € TTC.")
+        money = [
+            r for r in rep.atoms if r.atom.canonical.startswith("money:EUR:")
+        ]
+        assert len(money) == 1
+        assert money[0].status.value == "verified"
+        assert money[0].matched_source == "products.csv"
+        rep2 = Verifier(db).verify("Le Produit Alpha coûte 3 284,71 €.")
+        money2 = [
+            r for r in rep2.atoms if r.atom.canonical.startswith("money:EUR:")
+        ]
+        assert len(money2) == 1
+        assert money2[0].status.value == "verified"
+
+
 # -------------------------------------------------------------------- DOCX
 
 

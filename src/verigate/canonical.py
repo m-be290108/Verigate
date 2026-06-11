@@ -50,7 +50,9 @@ def canonical_number(s: str) -> str:
     decimal comma to a dot, drop a trailing ``.0``-style zero fraction.
 
     ``"1 234,50"`` → ``"1234.5"``;  ``"1,234.50"`` → ``"1234.5"``;
-    ``"49.99"`` → ``"49.99"``;  ``"200.0"`` → ``"200"``.
+    ``"49.99"`` → ``"49.99"``;  ``"200.0"`` → ``"200"``;
+    ``"3,284,71"`` → ``"3284.71"`` (French all-comma: thousands commas plus
+    a decimal comma, systematic in BDPM exports for amounts ≥ 1000 €).
     """
     s = s.strip().replace(" ", "").replace(" ", "")
     # Both separators present: the last one is the decimal mark.
@@ -60,9 +62,15 @@ def canonical_number(s: str) -> str:
         else:
             s = s.replace(",", "")
     elif "," in s:
+        groups = s.split(",")
+        # Several commas with a 2-digit last group ('3,284,71'): commas are
+        # thousands separators except the last one, which is the decimal
+        # mark — a 3-digit last group ('1,234,567') stays all-thousands.
+        if len(groups) > 2 and all(g.isdigit() for g in groups) and len(groups[-1]) == 2:
+            s = "".join(groups[:-1]) + "." + groups[-1]
         # Lone comma: decimal if followed by 1-2 digits at the end (49,99),
         # thousands otherwise (1,234 / 12,345,678).
-        if re.fullmatch(r"\d{1,3}(,\d{3})+", s):
+        elif re.fullmatch(r"\d{1,3}(,\d{3})+", s):
             s = s.replace(",", "")
         else:
             s = s.replace(",", ".")

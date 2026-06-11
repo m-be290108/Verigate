@@ -40,6 +40,15 @@ Entity glossary — three sources, in this order:
 
 Entities are stored with ``canonical_entity(value)`` as the canonical key
 and ``value.strip()`` as the raw form.
+
+Money-semantic CSV columns (D-016) — a column whose header contains
+``price``/``prix``/``cost``/``montant`` as a substring, or ``eur``/``euro``/
+``euros`` as a whole token (substring would catch 'couleur'/'valeur'), ALSO
+indexes each parseable cell as a ``money:EUR`` atom: ERP exports routinely
+carry bare decimal prices with no € sign, which would otherwise index as
+plain decimals and never match the ``money:EUR:…`` atoms extracted from
+answers. Unparseable cells (empty, 'N/A', free text) are skipped, never
+indexed as garbage.
 """
 
 from __future__ import annotations
@@ -53,7 +62,7 @@ from pathlib import Path
 
 import yaml
 
-from verigate.canonical import canonical_entity
+from verigate.canonical import canonical_entity, canonical_number
 from verigate.corpus import CorpusDB
 from verigate.extract.numbers import extract_numbers
 from verigate.extract.references import extract_references
@@ -61,6 +70,25 @@ from verigate.ingest.loaders import SUPPORTED_EXTENSIONS, LoaderError, load_file
 
 #: CSV header names whose cells become glossary entities (lowercase).
 _ENTITY_CSV_COLUMNS = frozenset({"name", "title", "product", "label"})
+
+#: Substrings of a (lowercased) CSV header marking a money-semantic column.
+_MONEY_CSV_SUBSTRINGS = ("price", "prix", "cost", "montant")
+
+#: Whole-token money markers — substring matching would catch the French
+#: words 'couleur' and 'valeur'.
+_MONEY_CSV_TOKENS = frozenset({"eur", "euro", "euros"})
+
+_HEADER_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+#: A money-cell amount once the € sign is stripped: digits with optional
+#: space/nbsp/narrow-nbsp/comma/dot/apostrophe separators. $/£ cells do NOT
+#: qualify — they carry an explicit non-EUR currency and are left to the
+#: rendered-text money extractor.
+_MONEY_CELL_RE = re.compile("\\d[\\d \u00a0\u202f.,']*")  # noqa: separators as escapes
+
+#: What canonical_number must yield for the cell to be indexed — anything
+#: else means the cell did not parse cleanly and is skipped, not indexed.
+_CANONICAL_DECIMAL_RE = re.compile(r"\d+(?:\.\d+)?")
 
 #: Markdown headings of level 2+ ('## Title', '### Title', …).
 _MD_HEADING_RE = re.compile(r"^#{2,}\s+(?P<text>.+)$", re.MULTILINE)
@@ -145,6 +173,51 @@ def _csv_entities(decoded: str) -> list[str]:
             if _ENTITY_MIN_WORDS <= len(cell.split()) <= _ENTITY_MAX_WORDS:
                 values.append(cell)
     return values
+
+
+def _is_money_header(header: str) -> bool:
+    """True iff `header` names a money-semantic column: price/prix/cost/
+    montant as a substring ('PrixTTC', 'unit_price'), or eur/euro/euros as
+    a whole token ('prix_eur' yes, 'couleur' no)."""
+    lowered = header.strip().lower()
+    if any(marker in lowered for marker in _MONEY_CSV_SUBSTRINGS):
+        return True
+    return bool(_MONEY_CSV_TOKENS & set(_HEADER_TOKEN_RE.findall(lowered)))
+
+
+def _money_cell_value(cell: str) -> str | None:
+    """The canonical_number value of a money-semantic CSV cell, or None
+    when the cell is not a cleanly parseable EUR amount ('N/A', free text,
+    a $/£ amount, or a separator layout canonical_number cannot resolve)."""
+    stripped = cell.strip().strip("€").strip()
+    lowered = stripped.lower()
+    for suffix in ("euros", "euro", "eur"):
+        if lowered.endswith(suffix):
+            stripped = stripped[: -len(suffix)].strip()
+            break
+    if not _MONEY_CELL_RE.fullmatch(stripped):
+        return None
+    value = canonical_number(stripped)
+    return value if _CANONICAL_DECIMAL_RE.fullmatch(value) else None
+
+
+def _csv_money_amounts(decoded: str) -> list[tuple[str, str]]:
+    """(canonical value, raw cell) pairs from money-semantic columns
+    (D-016) — parsed cell-wise so bare decimals and French multi-comma
+    amounts ('3,284,71') index as money:EUR despite the missing € sign."""
+    rows = list(csv.reader(io.StringIO(decoded)))
+    if not rows:
+        return []
+    indexes = [i for i, head in enumerate(rows[0]) if _is_money_header(head)]
+    amounts: list[tuple[str, str]] = []
+    for row in rows[1:]:
+        for i in indexes:
+            if i >= len(row):
+                continue
+            value = _money_cell_value(row[i])
+            if value is not None:
+                amounts.append((value, row[i].strip()))
+    return amounts
 
 
 def _md_entities(text: str) -> list[str]:
@@ -261,7 +334,10 @@ def ingest_folder(
                 kind = atom.pack.removeprefix("number:")
                 db.add_number(atom.canonical, atom.raw, kind, relpath)
             if suffix == ".csv":
-                _add_entities(db, _csv_entities(source_bytes.decode("utf-8")), relpath)
+                decoded = source_bytes.decode("utf-8")
+                _add_entities(db, _csv_entities(decoded), relpath)
+                for value, raw_cell in _csv_money_amounts(decoded):
+                    db.add_number(f"money:EUR:{value}", raw_cell, "money", relpath)
             elif suffix == ".md":
                 _add_entities(db, _md_entities(text), relpath)
 

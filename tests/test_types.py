@@ -86,6 +86,15 @@ class TestCanonical:
         assert canonical_number("200.0") == "200"
         assert canonical_number("249.99") == "249.99"
 
+    def test_french_all_comma_amounts(self):
+        # BDPM-style ≥ 1000 € amounts: thousands commas plus a decimal
+        # comma — the 2-digit last group marks the decimal.
+        assert canonical_number("3,284,71") == "3284.71"
+        assert canonical_number("12,345,67") == "12345.67"
+        assert canonical_number("1,234,50") == "1234.5"
+        # A 3-digit last group stays all-thousands.
+        assert canonical_number("1,234,567") == "1234567"
+
 
 class TestDedupeOverlapping:
     def test_longest_span_wins(self):
