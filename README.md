@@ -103,6 +103,13 @@ trade-off, documented in `DECISIONS.md`):
 - An invented entity name *far* from anything in the glossary is flagged
   `unverifiable`, not `false` (near-misses are caught; pure inventions of
   unknown shape have nothing to be checked against).
+- **Abbreviating is not lying**: an entity name whose tokens form a
+  contiguous run inside a glossary entry ("FENOFIBRATE TEVA SANTE 200 mg"
+  for the official "…, gélule" form) is VERIFIED, not flagged (D-015).
+  The flip side: an abbreviation shared by several entries verifies
+  against *some* real entry — which one the sentence meant is not checked
+  (same membership-not-association trade-off as above). A changed token
+  ("… 300 mg" when only 200 mg exists) is still caught.
 - Paraphrased quotes are not matched — verbatim (normalized) only.
 - Identifiers in prose are redacted only when they match a known pack
   format: if a flagged `[REF: X]` has a bare twin `X` of a shape no pack

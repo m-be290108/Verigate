@@ -11,7 +11,9 @@ Two packs, adjudicated later by the engine (the extractor only labels them):
   a known-entity span, kept only if plausibly related to the glossary
   (shared canonical token, or SequenceMatcher ratio ≥ 0.72 with some
   entry). Unrelated capitalized phrases ('Best Regards', 'New York') are
-  not extracted.
+  not extracted. A candidate ending in a digit is extended over a single
+  lowercase dose-unit token that follows ('FENOFIBRATE TEVA SANTE 200 mg',
+  not '… 200') — posology suffixes belong to the product name (D-015).
 
 Accent-insensitive matching runs on a length-preserving ASCII "shadow" of
 the haystack so spans index the ORIGINAL text. NFKD on the whole haystack
@@ -47,6 +49,14 @@ _LEADING_STOPWORDS = frozenset(
 _RATIO_THRESHOLD = 0.72
 
 _SEPARATOR_RE = re.compile(r"[\s\-]+")
+
+#: Lowercase dose-unit token glued (one separator) after a trailing digit —
+#: the posology tail of a product name ('… 200 mg', '… 200 µg', '… 5000 ui').
+#: Matched on the ASCII shadow, where 'µ' (U+00B5 MICRO SIGN) folds to 'μ'
+#: (U+03BC) and nbsp/narrow-nbsp fold to a plain space. Alternation is
+#: longest-first so 'mg' wins over 'g'. Uppercase forms ('200 UI') need no
+#: extension: they already satisfy the candidate token pattern.
+_DOSE_SUFFIX_RE = re.compile(r" (?:mcg|cl|dl|iu|kg|mg|ml|ug|ui|μg|g|l)(?![A-Za-z0-9])")
 
 
 def _ascii_shadow(text: str) -> str:
@@ -105,6 +115,10 @@ class EntityExtractor:
                 known_spans.add((start, end))
         for m in _CANDIDATE_RE.finditer(shadow):
             start, end = m.span()
+            if shadow[end - 1].isdigit():
+                suffix = _DOSE_SUFFIX_RE.match(shadow, end)
+                if suffix is not None:
+                    end = suffix.end()
             first_token = _SEPARATOR_RE.split(m.group())[0]
             if first_token.lower() in _LEADING_STOPWORDS:
                 # Candidates have ≥ 2 tokens, so a separator always follows

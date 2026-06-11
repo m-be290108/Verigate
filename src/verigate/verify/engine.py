@@ -30,6 +30,7 @@ randomness; every iteration order is fixed or sorted.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -70,6 +71,25 @@ _DETAIL_NO_CLOSE_MATCH = "not in glossary, no close match — cannot verify"
 #: matched_source value for atoms grounded in the per-call context.
 _CONTEXT_SOURCE = "context"
 
+#: Digit↔letter boundary inside a canonical token ('25mg' → '25', 'mg').
+_DIGIT_LETTER_RE = re.compile(r"(?<=\d)(?=[a-z])|(?<=[a-z])(?=\d)")
+
+
+def _entity_tokens(canonical: str) -> tuple[str, ...]:
+    """Tokens of a canonical entity, additionally split at digit↔letter
+    boundaries so '25mg' and '25 mg' compare token-equal (D-015)."""
+    return tuple(
+        piece for token in canonical.split() for piece in _DIGIT_LETTER_RE.split(token)
+    )
+
+
+def _is_contiguous_run(needle: tuple[str, ...], haystack: tuple[str, ...]) -> bool:
+    """True iff `needle` appears as a contiguous token run inside `haystack`."""
+    if not needle:
+        return False
+    n = len(needle)
+    return any(haystack[i : i + n] == needle for i in range(len(haystack) - n + 1))
+
 
 @dataclass
 class VerifyConfig:
@@ -98,6 +118,11 @@ class Verifier:
         )
         #: sorted (canonical, raw) snapshot — also the near-miss search space.
         self._glossary = corpus.entities()
+        #: (canonical, raw, split tokens) — precomputed for the D-015
+        #: abbreviation check, in the same sorted order as _glossary.
+        self._glossary_tokens = [
+            (canonical, raw, _entity_tokens(canonical)) for canonical, raw in self._glossary
+        ]
         self._references = ReferenceExtractor([load_pack(n) for n in pack_names])
         self._numbers = NumberExtractor()
         self._quotes = QuoteExtractor(min_words=self.config.quote_min_words)
@@ -242,13 +267,35 @@ class Verifier:
 
     def _adjudicate_candidate(self, atom: Atom, ctx_texts: list[str]) -> AtomResult:
         """pack='glossary_candidate': corpus, then context containment, then
-        nearest glossary entry — MISMATCHED if close, UNVERIFIABLE if not."""
+        D-015 abbreviation (contiguous token run of a glossary entry →
+        VERIFIED), then nearest glossary entry — MISMATCHED if close,
+        UNVERIFIABLE if not."""
         doc = self.corpus.has_entity(atom.canonical)
         if doc is not None:
             return AtomResult(atom, AtomStatus.VERIFIED, matched_source=doc)
         cand_text = canonical_text(atom.raw)
         if cand_text and any(cand_text in t for t in ctx_texts):
             return AtomResult(atom, AtomStatus.VERIFIED, matched_source=_CONTEXT_SOURCE)
+        # D-015: abbreviating a real name is not a lie. A candidate whose
+        # split tokens form a contiguous run inside a glossary entry — a
+        # strict prefix, an inner segment, or the whole entry modulo
+        # spacing — is the user shortening that entry, not inventing an
+        # entity. First match in sorted-glossary order wins (deterministic);
+        # an entry that no longer resolves in the corpus is skipped, like
+        # the glossary-drift path above.
+        cand_tokens = _entity_tokens(atom.canonical)
+        for entry_canonical, entry_raw, entry_tokens in self._glossary_tokens:
+            if not _is_contiguous_run(cand_tokens, entry_tokens):
+                continue
+            doc = self.corpus.has_entity(entry_canonical)
+            if doc is None:
+                continue
+            return AtomResult(
+                atom,
+                AtomStatus.VERIFIED,
+                matched_source=doc,
+                detail=f"abbreviation of glossary entry '{entry_raw}'",
+            )
         # Closest glossary entry; self._glossary is sorted by canonical and
         # the strict '>' keeps the first maximum, so ties break by (higher
         # ratio, lexicographically smaller entry canonical) — deterministic.

@@ -225,6 +225,61 @@ def test_entity_near_miss_tie_breaks_on_smaller_canonical(tmp_path):
     db.close()
 
 
+@pytest.fixture
+def bdpm_verifier(tmp_path):
+    """BDPM-style glossary: long official names ('…, gélule') — the model
+    abbreviates them (real-data eval, D-015)."""
+    db = CorpusDB(tmp_path / "bdpm.db", create=True)
+    names = [
+        "FENOFIBRATE TEVA SANTE 200 mg, gélule",
+        "PREGABALINE BIOGARAN 25 mg, gélule",
+    ]
+    text = "\n".join(names)
+    db.add_document("bdpm", "bdpm.md", text, _sha(text))
+    for name in names:
+        db.add_entity(canonical_entity(name), name, "bdpm")
+    db.finalize_manifest()
+    yield Verifier(db)
+    db.close()
+
+
+def test_entity_abbreviating_glossary_entry_is_verified(bdpm_verifier):
+    # Real-data eval FP (cases 012/014/033/047): the model wrote the full
+    # commercial name, the glossary held the long form with the
+    # pharmaceutical-form tail — MISMATCHED at the time, VERIFIED now.
+    answer = "Le FENOFIBRATE TEVA SANTE 200 mg est un hypolipémiant."
+    rep = bdpm_verifier.verify(answer)
+    entities = [r for r in rep.atoms if r.atom.type is AtomType.ENTITY]
+    assert len(entities) == 1
+    assert entities[0].status is AtomStatus.VERIFIED
+    assert entities[0].matched_source == "bdpm"
+    assert (
+        entities[0].detail
+        == "abbreviation of glossary entry 'FENOFIBRATE TEVA SANTE 200 mg, gélule'"
+    )
+    assert rep.corrected_answer == answer
+
+
+def test_entity_glued_dose_abbreviation_is_verified(bdpm_verifier):
+    # '25mg' vs glossary '25 mg': tokens split at digit↔letter boundaries
+    # compare equal, so the spacing drift does not break the prefix match.
+    answer = "La PREGABALINE BIOGARAN 25mg est remboursée."
+    rep = bdpm_verifier.verify(answer)
+    entities = [r for r in rep.atoms if r.atom.type is AtomType.ENTITY]
+    assert len(entities) == 1
+    assert entities[0].status is AtomStatus.VERIFIED
+    assert rep.corrected_answer == answer
+
+
+def test_entity_wrong_dose_is_still_mismatched(bdpm_verifier):
+    # 300 mg is NOT an abbreviation of the 200 mg entry: '300' breaks the
+    # contiguous token run, and the ratio path still flags the near-miss.
+    rep = bdpm_verifier.verify("Le FENOFIBRATE TEVA SANTE 300 mg existe.")
+    entities = [r for r in rep.atoms if r.atom.type is AtomType.ENTITY]
+    assert len(entities) == 1
+    assert entities[0].status is AtomStatus.MISMATCHED
+
+
 def test_unrelated_capitalized_phrase_is_never_false(verifier):
     answer = "Best Regards from the support team."
     rep = verifier.verify(answer)

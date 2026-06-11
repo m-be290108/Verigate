@@ -109,3 +109,20 @@ trail records verification events, not engine computations. Default 0
 high-QPS/FAQ optimization, not a default need. The API's post-ingest Gate
 swap restarts the cache (old reports were rendered against the old
 fingerprint).
+
+## D-015 — Abbreviating a glossary entry is not a lie
+Real-data eval (BDPM, 2026-06-11): 4 of the 5 mode-A false positives were
+the model writing the full commercial name ('FENOFIBRATE TEVA SANTE
+200 mg') while the glossary held the long official form ('…, gélule') —
+the candidate extractor truncated the span before the lowercase dose
+suffix, and the engine then MISMATCHED the resulting near-miss, mutilating
+7.1% of grounded answers. Two changes: (1) a candidate span ending in a
+digit extends over a following lowercase dose-unit token (mg, g, ml, µg,
+ui, …); (2) a candidate whose canonical tokens — split at digit↔letter
+boundaries, so '25mg' equals '25 mg' — form a *contiguous run* inside a
+glossary entry is VERIFIED (detail names the entry): the user abbreviates
+a real name. A changed token ('… 300 mg' against a 200 mg entry) breaks
+the run and still lands in the MISMATCHED ratio path. Trade-off accepted:
+an abbreviation shared by several entries verifies against the first in
+sorted order — membership, not association (D-013), unchanged. Rejected:
+keeping MISMATCHED for abbreviations (deletes correct product names).

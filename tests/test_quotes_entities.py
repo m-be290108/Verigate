@@ -374,6 +374,71 @@ def test_entity_spans_index_original_text():
         assert text[a.start : a.end] == a.raw
 
 
+#: BDPM-style glossary: long official forms ('…, gélule') — the model
+#: typically writes the name without the pharmaceutical-form tail (D-015).
+BDPM_GLOSSARY = [
+    (
+        "fenofibrate teva sante 200 mg gelule",
+        "FENOFIBRATE TEVA SANTE 200 mg, gélule",
+    ),
+    (
+        "pregabaline biogaran 25 mg gelule",
+        "PREGABALINE BIOGARAN 25 mg, gélule",
+    ),
+]
+
+
+def test_dose_suffix_extends_candidate_span():
+    # Real-data eval FP: the candidate used to stop at '… 200', truncating
+    # the lowercase dose suffix out of the product name.
+    text = "Le FENOFIBRATE TEVA SANTE 200 mg est commercialisé."
+    atoms = EntityExtractor(BDPM_GLOSSARY).extract(text)
+    assert len(atoms) == 1
+    a = atoms[0]
+    assert a.pack == "glossary_candidate"
+    assert a.raw == "FENOFIBRATE TEVA SANTE 200 mg"
+    assert text[a.start : a.end] == a.raw
+    assert a.canonical == "fenofibrate teva sante 200 mg"
+
+
+def test_glued_dose_token_already_in_span():
+    # '25mg' starts with a digit: the candidate regex includes it without
+    # any extension.
+    text = "La PREGABALINE BIOGARAN 25mg est disponible."
+    atoms = EntityExtractor(BDPM_GLOSSARY).extract(text)
+    assert len(atoms) == 1
+    assert atoms[0].raw == "PREGABALINE BIOGARAN 25mg"
+
+
+def test_micro_sign_suffix_extends_candidate_span():
+    # 'µ' (MICRO SIGN) folds to 'μ' (GREEK MU) in the ASCII shadow; the
+    # span still indexes the original text.
+    glossary = [("levothyrox ab 200 g comprime", "LEVOTHYROX AB 200 µg, comprimé")]
+    text = "le LEVOTHYROX AB 200 µg reste indiqué."
+    atoms = EntityExtractor(glossary).extract(text)
+    assert len(atoms) == 1
+    a = atoms[0]
+    assert a.raw == "LEVOTHYROX AB 200 µg"
+    assert text[a.start : a.end] == a.raw
+
+
+def test_dose_suffix_requires_trailing_digit():
+    # 'Pro' does not end with a digit: a following lowercase unit-like
+    # token is prose, not a posology suffix.
+    text = "voici AquaPump Pro mg en stock"
+    atoms = EntityExtractor(GLOSSARY).extract(text)
+    assert len(atoms) == 1
+    assert atoms[0].raw == "AquaPump Pro"
+
+
+def test_dose_suffix_must_be_whole_token():
+    # 'mgx' is not a dose-unit token: no extension.
+    text = "Le FENOFIBRATE TEVA SANTE 200 mgx existe."
+    atoms = EntityExtractor(BDPM_GLOSSARY).extract(text)
+    assert len(atoms) == 1
+    assert atoms[0].raw == "FENOFIBRATE TEVA SANTE 200"
+
+
 def test_entities_deterministic():
     text = "voici La AquaPump 350, la Méga Pompe et un HydroFilter Mini."
     extractor = EntityExtractor(GLOSSARY)
