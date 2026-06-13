@@ -2,7 +2,7 @@
 
 <!-- Replace USERNAME with the GitHub account/org before publishing. -->
 [![CI](https://github.com/USERNAME/verigate/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/verigate/actions/workflows/ci.yml)
-[![License: FSL-1.1-Apache-2.0](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg)](LICENSE)
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
 **Deterministic verification layer for generative AI answers.**
@@ -72,6 +72,9 @@ See it catch hallucinations right now (no setup beyond the repo):
 ```bash
 PYTHONPATH=src python examples/proof.py
 ```
+
+Connecting it to your own LLM stack (Python library or HTTP sidecar, any
+language) → [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 ## What it checks
 
@@ -206,7 +209,7 @@ that a human should look.
 
 ## License
 
-**FSL-1.1-Apache-2.0** (Functional Source License) — see [LICENSE](LICENSE).
+**FSL-1.1-ALv2** (Functional Source License) — see [LICENSE](LICENSE).
 
 In plain words: you may read, self-host, modify and use VeriGate for any
 purpose **except** offering it as a competing commercial product or service.

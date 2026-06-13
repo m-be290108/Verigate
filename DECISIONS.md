@@ -142,7 +142,7 @@ parse cleanly ('N/A', free text) are skipped, never indexed as garbage.
 Rejected: rewriting cell values in the rendered text (the extractors must
 see the verbatim source, and a mangled render would "verify" garbage).
 
-## D-017 — License is FSL-1.1-Apache-2.0 (source-available, not open source)
+## D-017 — License is FSL-1.1-ALv2 (source-available, not open source)
 Replaces the BUSL-1.1 placeholder. The goal is "anyone can read and
 self-host it (trust matters for a verification/audit tool), nobody can take
 this code and sell it as a competing product." FSL-1.1 (by Sentry) says

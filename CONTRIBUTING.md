@@ -42,7 +42,7 @@ PYTHONPATH=src .venv/bin/pytest tests/test_engine.py -q
 
 ## License of contributions
 
-VeriGate is licensed under **FSL-1.1-Apache-2.0** (see `LICENSE`). By
+VeriGate is licensed under **FSL-1.1-ALv2** (see `LICENSE`). By
 submitting a contribution, you agree it is licensed under the same terms. In
 short: anyone may read, self-host and modify VeriGate; nobody may offer it as a
 competing commercial product; and the whole thing becomes Apache-2.0 two years
