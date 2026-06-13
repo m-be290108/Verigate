@@ -100,11 +100,13 @@ never validated.
 Known limitations, by design (each one is a deliberate false-positive
 trade-off, documented in `DECISIONS.md`):
 
-- **Membership, not association**: an atom is VERIFIED when it appears
-  *anywhere* in your corpus. A real value attributed to the wrong subject
-  (product A sold at product B's genuine price, a real article number cited
-  for the wrong rule) is **not** caught. VeriGate proves "this value exists
-  in your data", not "this value belongs to this sentence's subject".
+- **Membership, not association** (default mode): an atom is VERIFIED when it
+  appears *anywhere* in your corpus. A real value attributed to the wrong
+  subject (product A sold at product B's genuine price, a real article number
+  cited for the wrong rule) is **not** caught by default. *Scoped mode fixes
+  this* — see "The closed-domain guarantee" below; turn it on for bounded
+  domains. Without it, VeriGate proves "this value exists in your data", not
+  "this value belongs to this sentence's subject".
 - Bare small integers ("the window is 25") are not checked — only anchored
   figures (money, %, units, dates) are.
 - Quotes under 3 words and single-quoted text are not checked.
@@ -208,7 +210,7 @@ events, not computations.
 ## Compliance
 
 - **Deterministic**: no LLM judge, no temperature, no drift. Same inputs,
-  same bytes. 366 tests, zero network (enforced by a socket-guard test).
+  same bytes. 408 tests, zero network (enforced by a socket-guard test).
 - **On-premise**: your data never leaves. The API binds localhost; there is
   no telemetry, no cloud, no outbound call anywhere in the codebase.
 - **Tamper-evident audit trail**: every verification is journaled (answer

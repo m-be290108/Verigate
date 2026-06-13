@@ -54,9 +54,10 @@ guessing — across three levels:
    corpus. Deterministic, requires a well-structured corpus.
 
 Each fact resolves to a precise, reproducible **address**:
-`document › section › subject › field`. That address appears in the report and
-in the audit trail — so every validated fact is traceable to its exact source
-coordinate. No training, no embeddings, no model: the right datum is reached by
+`document › section › subject` (field-level addressing is the optional level 3
+above). That address appears in the report (`matched_source`) and in the audit
+trail — so every validated fact is traceable to its exact source coordinate.
+No training, no embeddings, no model: the right datum is reached by
 elimination, not by prediction.
 
 ## What VeriGate guarantees (in scoped + strict mode)
