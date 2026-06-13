@@ -1,4 +1,9 @@
-# VeriGate (working name)
+# VeriGate
+
+<!-- Replace USERNAME with the GitHub account/org before publishing. -->
+[![CI](https://github.com/USERNAME/verigate/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/verigate/actions/workflows/ci.yml)
+[![License: FSL-1.1-Apache-2.0](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
 **Deterministic verification layer for generative AI answers.**
 No LLM. No network. On-premise only. Audit-ready.
@@ -123,13 +128,19 @@ identical report, proven by test), that you can show a regulator or a
 customer. Any marketing claim beyond this is a lie, and this repository
 refuses to make it.
 
-## Benchmark — both numbers, always
+## Benchmark — what it proves, and what it can't
 
-A detector that misses lies is worthless; so is one that cries wolf. The
-self-validating bench generates a synthetic corpus, injects **one labeled
-hallucination per corrupted answer** (7 types: mutated SKU, wrong price,
-distorted quote, entity variant, mutated EAN, wrong URL path, wrong warranty
-duration) and measures both directions:
+**Read this scope first, before the numbers** (it is the honest part, and the
+first thing a skeptic should ask): these figures are on a **synthetic** corpus
+with **one labeled, anchored-atom lie injected per corrupted answer**, across
+**7 covered lie types** (mutated SKU, wrong price, distorted quote, entity
+variant, mutated EAN, wrong URL path, wrong warranty duration). Every injected
+lie is **novel by construction** — its value appears nowhere in the corpus —
+so the detection figure measures catching values that are *absent* from the
+corpus. It does **not** measure cross-attribution errors (a real corpus value
+attributed to the wrong subject — see D-013), and it is not a claim that "no
+hallucination can pass." A detector that misses lies is worthless; so is one
+that cries wolf — so both directions are always reported:
 
 | Metric | Result (full run: 100 products, 150 clean + 250 corrupted answers) | Gate |
 |---|---|---|
@@ -137,14 +148,14 @@ duration) and measures both directions:
 | False-positive rate (grounded atoms wrongly flagged) | **0.00 %** | ≤ 2 % |
 
 Reproduce: `make bench-quick` (CI-gated) or
-`PYTHONPATH=src python -m bench.run` (full). Same seed → byte-identical
-output. **Honest caveat**: these numbers are on synthetic, anchored-atom
-lies within the covered types above — they say "the machine does exactly
-what it promises on what it covers", not "no hallucination can pass".
-Every injected lie is novel by construction (its value appears nowhere in
-the corpus), so the figure measures detection of *absent* values only; it
-cannot and does not measure cross-attribution errors (a real corpus value
-attributed to the wrong subject — see limitations above).
+`PYTHONPATH=src python -m bench.run` (full). Same seed → byte-identical output.
+
+**On real data** (a held-out test on the official French BDPM medicines
+database — 300 medicines, answers from a local LLM), the false-positive rate
+on grounded answers was higher and corpus-format-dependent, and the real
+failure mode is cross-attribution on dense catalogs (D-013). The honest
+takeaway: VeriGate is strongest where the atom is a **unique identifier**
+(legal citation, DOI, SKU, code), where absence-from-corpus *is* the lie.
 
 ## Latency
 
@@ -195,4 +206,9 @@ that a human should look.
 
 ## License
 
-BUSL-1.1 (placeholder — final license TBD).
+**FSL-1.1-Apache-2.0** (Functional Source License) — see [LICENSE](LICENSE).
+
+In plain words: you may read, self-host, modify and use VeriGate for any
+purpose **except** offering it as a competing commercial product or service.
+Two years after each release, that version becomes Apache-2.0 (fully open
+source). This protects the work, not the idea — see `DECISIONS.md` (D-017).

@@ -141,3 +141,18 @@ BDPM exports ≥ 1000 €) parse via `canonical_number`: several commas with a
 parse cleanly ('N/A', free text) are skipped, never indexed as garbage.
 Rejected: rewriting cell values in the rendered text (the extractors must
 see the verbatim source, and a mangled render would "verify" garbage).
+
+## D-017 — License is FSL-1.1-Apache-2.0 (source-available, not open source)
+Replaces the BUSL-1.1 placeholder. The goal is "anyone can read and
+self-host it (trust matters for a verification/audit tool), nobody can take
+this code and sell it as a competing product." FSL-1.1 (by Sentry) says
+exactly that: any Permitted Purpose except a Competing Use, auto-converting
+to Apache-2.0 two years after each release. Chosen over BUSL-1.1 (no
+per-vendor Additional Use Grant to negotiate — less enterprise-legal
+friction) and over MIT/Apache (which would let a competitor relabel the
+work). Honest scope: **a license protects the code, not the idea** — nobody
+is stopped from reimplementing the concept from scratch; the moat is being
+first plus execution, not the license. Licensor is currently the individual
+(Mathieu Bellot); transferable to a company once incorporated. Note: FSL is
+source-available, NOT OSI-approved open source — so pyproject keeps
+`license = { file = "LICENSE" }` and adds no "OSI Approved" classifier.
