@@ -17,10 +17,12 @@ from __future__ import annotations
 
 from itertools import pairwise
 
-from verigate.types import FALSE_STATUSES, REMOVAL_MARKERS, AtomResult
+from verigate.types import FALSE_STATUSES, REMOVAL_MARKERS, AtomResult, AtomStatus
 
 
-def rewrite_answer(answer: str, results: list[AtomResult]) -> str:
+def rewrite_answer(
+    answer: str, results: list[AtomResult], strip_unverifiable: bool = False
+) -> str:
     """Return `answer` with every false atom span replaced by its marker.
 
     Every ``AtomResult`` whose status is in ``FALSE_STATUSES`` has its
@@ -28,14 +30,21 @@ def rewrite_answer(answer: str, results: list[AtomResult]) -> str:
     Spans are processed in DESCENDING start order so earlier offsets stay
     valid while splicing.
 
+    ``strict`` mode (D-018) passes ``strip_unverifiable=True``: UNVERIFIABLE
+    atoms are also spliced out, so the shown answer contains only grounded
+    facts (closed-world). The default is unchanged — only false atoms go.
+
     The engine guarantees globally non-overlapping spans (dedupe), but this
     is asserted defensively: a ValueError is raised on any overlap, because
     splicing overlapping spans would silently corrupt customer text.
     """
+    strip = set(FALSE_STATUSES)
+    if strip_unverifiable:
+        strip.add(AtomStatus.UNVERIFIABLE)
     spans = sorted(
         (r.atom.start, r.atom.end, r.atom.type)
         for r in results
-        if r.status in FALSE_STATUSES
+        if r.status in strip
     )
     for (s1, e1, _t1), (s2, e2, _t2) in pairwise(spans):
         if e1 > s2:

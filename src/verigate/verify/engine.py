@@ -67,6 +67,9 @@ _DETAIL_NUMBER_NOT_FOUND = "number not found in trusted corpus"
 _DETAIL_QUOTE_NOT_FOUND = "quote not found verbatim in trusted corpus"
 _DETAIL_GLOSSARY_DRIFT = "glossary entity not found in trusted corpus"
 _DETAIL_NO_CLOSE_MATCH = "not in glossary, no close match — cannot verify"
+_WARN_SCOPE_SKIPPED = (
+    "scoped verification skipped: no known subject mentioned in the answer"
+)
 
 #: matched_source value for atoms grounded in the per-call context.
 _CONTEXT_SOURCE = "context"
@@ -99,6 +102,13 @@ class VerifyConfig:
     quote_min_words: int = 3
     entity_near_miss_threshold: float = 0.8
     packs: tuple[str, ...] | None = None
+    #: D-018 — verify each fact against the section of the answer's SUBJECT,
+    #: not the whole corpus (catches cross-attribution: a real value given to
+    #: the wrong subject). Default False = global membership (unchanged).
+    scoped: bool = False
+    #: D-018 — closed-world: also strip UNVERIFIABLE atoms from the shown
+    #: answer (only grounded facts reach the user). Default False (unchanged).
+    strict: bool = False
 
 
 class Verifier:
@@ -186,8 +196,24 @@ class Verifier:
             ctx_numbers.update(a.canonical for a in self._numbers.extract(chunk))
             ctx_texts.append(canonical_text(chunk))
 
+        # D-018 scoped mode: the subjects are the corpus entities the answer is
+        # about; each ref/number is then verified against THOSE subjects'
+        # sections, not the whole corpus. With no detectable subject we cannot
+        # scope, so we fall back to global membership and say so (refusing
+        # everything would be wrong). subjects=None means "global path" — both
+        # scoped=False and scoped-without-subject take it, so default behavior
+        # is byte-identical.
+        subjects: frozenset[str] | None = None
+        if self.config.scoped:
+            detected = self._detect_subjects(atoms)
+            if detected:
+                subjects = detected
+            else:
+                warnings.append(_WARN_SCOPE_SKIPPED)
+
         results = [
-            self._adjudicate(atom, ctx_refs, ctx_numbers, ctx_texts) for atom in atoms
+            self._adjudicate(atom, ctx_refs, ctx_numbers, ctx_texts, subjects)
+            for atom in atoms
         ]
         results.sort(key=lambda r: (r.atom.start, r.atom.end))
 
@@ -213,11 +239,34 @@ class Verifier:
             verdict=verdict,
             score=score,
             atoms=results,
-            corrected_answer=rewrite_answer(answer, results),
+            corrected_answer=rewrite_answer(
+                answer, results, strip_unverifiable=self.config.strict
+            ),
             answer_sha256=answer_sha,
             corpus_fingerprint=fingerprint,
             warnings=warnings,
         )
+
+    def _detect_subjects(self, atoms: list[Atom]) -> frozenset[str]:
+        """The corpus subjects the answer is about (D-018): for each ENTITY
+        atom, its resolved corpus subject canonical — an exact glossary hit,
+        or the entry it abbreviates (D-015, first in sorted-glossary order).
+        Deterministic; an atom that resolves to nothing contributes nothing."""
+        subjects: set[str] = set()
+        for atom in atoms:
+            if atom.type is not AtomType.ENTITY:
+                continue
+            if self.corpus.has_entity(atom.canonical) is not None:
+                subjects.add(atom.canonical)
+                continue
+            cand_tokens = _entity_tokens(atom.canonical)
+            for entry_canonical, _entry_raw, entry_tokens in self._glossary_tokens:
+                if _is_contiguous_run(cand_tokens, entry_tokens) and (
+                    self.corpus.has_entity(entry_canonical) is not None
+                ):
+                    subjects.add(entry_canonical)
+                    break
+        return frozenset(subjects)
 
     # ------------------------------------------------------------------ #
     # Adjudication
@@ -229,9 +278,26 @@ class Verifier:
         ctx_refs: set[str],
         ctx_numbers: set[str],
         ctx_texts: list[str],
+        subjects: frozenset[str] | None,
     ) -> AtomResult:
-        """Adjudicate one atom: corpus first, then context, else false."""
+        """Adjudicate one atom: corpus first, then context, else false.
+
+        ``subjects`` is None on the global path (scoped off, or scoped with no
+        detectable subject); then ref/number checks use membership exactly as
+        before. When a subject set is given (D-018), ref/number must be
+        grounded FOR a subject (or a shared section); a value that exists
+        globally but not for the subject is cross-attribution → MISMATCHED.
+        """
         if atom.type is AtomType.REFERENCE:
+            if subjects is not None:
+                return self._scoped_ref_or_number(
+                    atom,
+                    self.corpus.has_reference_scoped(atom.canonical, subjects),
+                    atom.canonical in ctx_refs,
+                    self.corpus.has_reference(atom.canonical),
+                    _DETAIL_REF_NOT_FOUND,
+                    subjects,
+                )
             doc = self.corpus.has_reference(atom.canonical)
             if doc is not None:
                 return AtomResult(atom, AtomStatus.VERIFIED, matched_source=doc)
@@ -240,6 +306,15 @@ class Verifier:
             return AtomResult(atom, AtomStatus.NOT_FOUND, detail=_DETAIL_REF_NOT_FOUND)
 
         if atom.type is AtomType.NUMBER:
+            if subjects is not None:
+                return self._scoped_ref_or_number(
+                    atom,
+                    self.corpus.has_number_scoped(atom.canonical, None, subjects),
+                    atom.canonical in ctx_numbers,
+                    self.corpus.has_number(atom.canonical),
+                    _DETAIL_NUMBER_NOT_FOUND,
+                    subjects,
+                )
             doc = self.corpus.has_number(atom.canonical)
             if doc is not None:
                 return AtomResult(atom, AtomStatus.VERIFIED, matched_source=doc)
@@ -255,7 +330,39 @@ class Verifier:
                 return AtomResult(atom, AtomStatus.VERIFIED, matched_source=_CONTEXT_SOURCE)
             return AtomResult(atom, AtomStatus.NOT_FOUND, detail=_DETAIL_QUOTE_NOT_FOUND)
 
-        # AtomType.ENTITY — two packs (see extract/entities.py).
+        return self._adjudicate_entity(atom, ctx_texts)
+
+    def _scoped_ref_or_number(
+        self,
+        atom: Atom,
+        scoped_doc: str | None,
+        in_context: bool,
+        global_doc: str | None,
+        not_found_detail: str,
+        subjects: frozenset[str],
+    ) -> AtomResult:
+        """D-018 scoped adjudication for a reference or number:
+        in-scope hit → VERIFIED; else context → VERIFIED; else exists globally
+        but not for the subject → MISMATCHED (cross-attribution, removed); else
+        NOT_FOUND."""
+        if scoped_doc is not None:
+            return AtomResult(atom, AtomStatus.VERIFIED, matched_source=scoped_doc)
+        if in_context:
+            return AtomResult(atom, AtomStatus.VERIFIED, matched_source=_CONTEXT_SOURCE)
+        if global_doc is not None:
+            return AtomResult(
+                atom,
+                AtomStatus.MISMATCHED,
+                detail=(
+                    "value exists in the corpus but not for "
+                    f"{', '.join(sorted(subjects))}: cross-attribution"
+                ),
+            )
+        return AtomResult(atom, AtomStatus.NOT_FOUND, detail=not_found_detail)
+
+    def _adjudicate_entity(self, atom: Atom, ctx_texts: list[str]) -> AtomResult:
+        """Entity adjudication (unchanged by scoping — entities ARE the
+        subjects): glossary membership, else the candidate path."""
         if atom.pack == "glossary":
             doc = self.corpus.has_entity(atom.canonical)
             if doc is not None:

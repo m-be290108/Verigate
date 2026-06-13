@@ -57,26 +57,43 @@ CREATE TRIGGER IF NOT EXISTS documents_fts_au AFTER UPDATE ON documents BEGIN
     INSERT INTO documents_fts(rowid, text) VALUES (new.rowid, new.text);
 END;
 
+-- Sections (scoped verification, D-018). A section binds atoms to the
+-- SUBJECT they describe so a value can be checked for the right subject,
+-- not merely for membership anywhere in the corpus. is_shared=1 holds facts
+-- that apply to ANY subject (a document preamble before the first heading,
+-- or a whole unstructured document). subject_canonical='' = no subject.
+CREATE TABLE IF NOT EXISTS sections (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id            TEXT NOT NULL,
+    ordinal           INTEGER NOT NULL,
+    subject_canonical TEXT NOT NULL DEFAULT '',
+    subject_raw       TEXT NOT NULL DEFAULT '',
+    is_shared         INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS refs (
-    canonical TEXT NOT NULL,
-    raw       TEXT NOT NULL,
-    doc_id    TEXT NOT NULL,
-    pack      TEXT NOT NULL,
+    canonical  TEXT NOT NULL,
+    raw        TEXT NOT NULL,
+    doc_id     TEXT NOT NULL,
+    pack       TEXT NOT NULL,
+    section_id INTEGER,
     PRIMARY KEY (canonical, doc_id, pack)
 );
 
 CREATE TABLE IF NOT EXISTS numbers (
-    canonical TEXT NOT NULL,
-    raw       TEXT NOT NULL,
-    kind      TEXT NOT NULL,
-    doc_id    TEXT NOT NULL,
+    canonical  TEXT NOT NULL,
+    raw        TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    doc_id     TEXT NOT NULL,
+    section_id INTEGER,
     PRIMARY KEY (canonical, kind, doc_id)
 );
 
 CREATE TABLE IF NOT EXISTS entities (
-    canonical TEXT NOT NULL,
-    raw       TEXT NOT NULL,
-    doc_id    TEXT NOT NULL,
+    canonical  TEXT NOT NULL,
+    raw        TEXT NOT NULL,
+    doc_id     TEXT NOT NULL,
+    section_id INTEGER,
     PRIMARY KEY (canonical, doc_id)
 );
 """
@@ -146,6 +163,7 @@ class CorpusDB:
             self._conn.execute("DELETE FROM refs WHERE doc_id = ?", (doc_id,))
             self._conn.execute("DELETE FROM numbers WHERE doc_id = ?", (doc_id,))
             self._conn.execute("DELETE FROM entities WHERE doc_id = ?", (doc_id,))
+            self._conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
             self._conn.execute(
                 """
                 INSERT INTO documents (id, source_path, sha256, text, canonical)
@@ -177,6 +195,7 @@ class CorpusDB:
             self._conn.execute("DELETE FROM refs WHERE doc_id = ?", (doc_id,))
             self._conn.execute("DELETE FROM numbers WHERE doc_id = ?", (doc_id,))
             self._conn.execute("DELETE FROM entities WHERE doc_id = ?", (doc_id,))
+            self._conn.execute("DELETE FROM sections WHERE doc_id = ?", (doc_id,))
             self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
             self._conn.execute("COMMIT")
         finally:
@@ -184,26 +203,81 @@ class CorpusDB:
                 with contextlib.suppress(sqlite3.Error):
                     self._conn.execute("ROLLBACK")
 
-    def add_reference(self, canonical: str, raw: str, doc_id: str, pack: str) -> None:
+    def add_section(
+        self,
+        doc_id: str,
+        ordinal: int,
+        subject_canonical: str,
+        subject_raw: str,
+        is_shared: bool,
+    ) -> int:
+        """Register a section and return its autoincrement id.
+
+        A section scopes the atoms registered with its id (scoped lookups,
+        D-018). ``is_shared`` true marks facts that apply to ANY subject (a
+        document preamble, or a whole unstructured document); the safe
+        degrade for content that has no per-subject structure.
+        """
+        cursor = self._conn.execute(
+            "INSERT INTO sections (doc_id, ordinal, subject_canonical, subject_raw, is_shared)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (doc_id, ordinal, subject_canonical, subject_raw, 1 if is_shared else 0),
+        )
+        return int(cursor.lastrowid)
+
+    def add_reference(
+        self,
+        canonical: str,
+        raw: str,
+        doc_id: str,
+        pack: str,
+        section_id: int | None = None,
+    ) -> None:
         """Register a reference occurrence. INSERT OR IGNORE — registry rows
-        are immutable facts, duplicate registrations are a no-op."""
+        are immutable facts, duplicate registrations are a no-op.
+
+        ``section_id`` (kept last, default None so existing callers are
+        unaffected) binds the atom to a section for scoped lookups; global
+        lookups ignore it.
+        """
         self._conn.execute(
-            "INSERT OR IGNORE INTO refs (canonical, raw, doc_id, pack) VALUES (?, ?, ?, ?)",
-            (canonical, raw, doc_id, pack),
+            "INSERT OR IGNORE INTO refs (canonical, raw, doc_id, pack, section_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (canonical, raw, doc_id, pack, section_id),
         )
 
-    def add_number(self, canonical: str, raw: str, kind: str, doc_id: str) -> None:
-        """Register an anchored-number occurrence (INSERT OR IGNORE)."""
+    def add_number(
+        self,
+        canonical: str,
+        raw: str,
+        kind: str,
+        doc_id: str,
+        section_id: int | None = None,
+    ) -> None:
+        """Register an anchored-number occurrence (INSERT OR IGNORE).
+
+        ``section_id`` (kept last, default None) binds the atom to a section
+        for scoped lookups; global lookups ignore it.
+        """
         self._conn.execute(
-            "INSERT OR IGNORE INTO numbers (canonical, raw, kind, doc_id) VALUES (?, ?, ?, ?)",
-            (canonical, raw, kind, doc_id),
+            "INSERT OR IGNORE INTO numbers (canonical, raw, kind, doc_id, section_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (canonical, raw, kind, doc_id, section_id),
         )
 
-    def add_entity(self, canonical: str, raw: str, doc_id: str) -> None:
-        """Register a glossary-entity occurrence (INSERT OR IGNORE)."""
+    def add_entity(
+        self, canonical: str, raw: str, doc_id: str, section_id: int | None = None
+    ) -> None:
+        """Register a glossary-entity occurrence (INSERT OR IGNORE).
+
+        ``section_id`` (kept last, default None) binds the entity to its own
+        section where natural; not used by scoped value lookups (entities
+        ARE the subjects).
+        """
         self._conn.execute(
-            "INSERT OR IGNORE INTO entities (canonical, raw, doc_id) VALUES (?, ?, ?)",
-            (canonical, raw, doc_id),
+            "INSERT OR IGNORE INTO entities (canonical, raw, doc_id, section_id)"
+            " VALUES (?, ?, ?, ?)",
+            (canonical, raw, doc_id, section_id),
         )
 
     # ------------------------------------------------------------------ #
@@ -234,7 +308,14 @@ class CorpusDB:
         adjudication actually matches against (contains_text), and the
         entity raw form surfaces in report details ('closest known: ...') —
         without both, two corpora with identical fingerprints could yield
-        different report bytes for the same answer (loader-drift hole)."""
+        different report bytes for the same answer (loader-drift hole).
+
+        Sectioning is also bound (D-018): the sorted section identity tuples
+        (doc_id, ordinal, subject_canonical, is_shared) AND the atom→section
+        linkage (each atom's section identity, not its opaque autoincrement
+        id). Without this, two corpora with identical flat atoms but
+        different sectioning — which adjudicate DIFFERENTLY in scoped mode —
+        would share a fingerprint, breaking the report-bytes guarantee."""
         docs = sorted(
             (doc_id, sha256, hashlib.sha256(canonical.encode("utf-8")).hexdigest())
             for doc_id, sha256, canonical in self._conn.execute(
@@ -250,11 +331,38 @@ class CorpusDB:
         ents = sorted(
             tuple(r) for r in self._conn.execute("SELECT DISTINCT canonical, raw FROM entities")
         )
+        # Section identity (stable across rebuilds — the autoincrement id is
+        # NOT used, only the natural key) and the atom→section linkage.
+        sections = sorted(
+            tuple(r)
+            for r in self._conn.execute(
+                "SELECT doc_id, ordinal, subject_canonical, is_shared FROM sections"
+            )
+        )
+        ref_links = sorted(
+            tuple(r)
+            for r in self._conn.execute(
+                "SELECT DISTINCT r.canonical, r.pack,"
+                " s.doc_id, s.ordinal, s.subject_canonical, s.is_shared"
+                " FROM refs AS r JOIN sections AS s ON s.id = r.section_id"
+            )
+        )
+        number_links = sorted(
+            tuple(r)
+            for r in self._conn.execute(
+                "SELECT DISTINCT n.canonical, n.kind,"
+                " s.doc_id, s.ordinal, s.subject_canonical, s.is_shared"
+                " FROM numbers AS n JOIN sections AS s ON s.id = n.section_id"
+            )
+        )
         payload = {
             "documents": [list(p) for p in docs],
             "refs": [list(p) for p in refs],
             "numbers": [list(p) for p in numbers],
             "entities": [list(p) for p in ents],
+            "sections": [list(p) for p in sections],
+            "ref_links": [list(p) for p in ref_links],
+            "number_links": [list(p) for p in number_links],
         }
         blob = json.dumps(
             payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
@@ -306,6 +414,65 @@ class CorpusDB:
             "SELECT doc_id FROM entities WHERE canonical = ? ORDER BY doc_id LIMIT 1",
             (canonical,),
         ).fetchone()
+        return row[0] if row else None
+
+    def has_reference_scoped(self, canonical: str, subjects: frozenset[str]) -> str | None:
+        """A doc_id where this reference canonical appears in a section whose
+        ``subject_canonical`` is in `subjects` OR is ``is_shared=1`` (scoped
+        lookup, D-018), smallest doc_id for determinism; else None.
+
+        Shared sections are always in scope (preamble/whole-document facts).
+        An empty `subjects` set therefore still matches shared-section atoms.
+        """
+        return self._scoped_lookup(
+            "SELECT r.doc_id AS match_doc FROM refs AS r JOIN sections AS s ON s.id = r.section_id"
+            " WHERE r.canonical = ?",
+            (canonical,),
+            subjects,
+        )
+
+    def has_number_scoped(
+        self, canonical: str, kind: str | None, subjects: frozenset[str]
+    ) -> str | None:
+        """A doc_id where this number canonical (optionally restricted to
+        `kind`) appears in a section whose ``subject_canonical`` is in
+        `subjects` OR is ``is_shared=1`` (scoped lookup, D-018), smallest
+        doc_id for determinism; else None. ``kind=None`` matches any kind."""
+        if kind is None:
+            return self._scoped_lookup(
+                "SELECT n.doc_id AS match_doc FROM numbers AS n"
+                " JOIN sections AS s ON s.id = n.section_id WHERE n.canonical = ?",
+                (canonical,),
+                subjects,
+            )
+        return self._scoped_lookup(
+            "SELECT n.doc_id AS match_doc FROM numbers AS n"
+            " JOIN sections AS s ON s.id = n.section_id"
+            " WHERE n.canonical = ? AND n.kind = ?",
+            (canonical, kind),
+            subjects,
+        )
+
+    def _scoped_lookup(
+        self, base_sql: str, base_params: tuple, subjects: frozenset[str]
+    ) -> str | None:
+        """Shared body of the scoped lookups: add the in-scope section filter
+        (subject_canonical IN sorted(subjects) OR is_shared=1) to `base_sql`
+        and return the smallest doc_id, or None. Subjects are bound sorted so
+        the parameter order is deterministic (it does not affect the result,
+        but keeps the emitted SQL reproducible)."""
+        ordered = sorted(subjects)
+        if ordered:
+            placeholders = ",".join("?" for _ in ordered)
+            sql = (
+                f"{base_sql} AND (s.is_shared = 1 OR s.subject_canonical IN ({placeholders}))"
+                " ORDER BY match_doc LIMIT 1"
+            )
+            params: tuple = base_params + tuple(ordered)
+        else:
+            sql = f"{base_sql} AND s.is_shared = 1 ORDER BY match_doc LIMIT 1"
+            params = base_params
+        row = self._conn.execute(sql, params).fetchone()
         return row[0] if row else None
 
     def entities(self) -> list[tuple[str, str]]:
@@ -392,7 +559,10 @@ class CorpusDB:
            form passes on a ghost-ridden index, finding-11 lesson);
         2. every documents.canonical equals canonical_text(text) recomputed;
         3. no refs/numbers/entities row points to a missing doc_id;
-        4. the stored fingerprint (if set) equals the recomputed one.
+        4. no refs/numbers/entities row points to a missing section_id (a
+           non-NULL section_id with no matching sections.id — dangling
+           scope link, D-018);
+        5. the stored fingerprint (if set) equals the recomputed one.
 
         Returns (ok, messages). Content problems are reported, never raised.
         The FTS check (1) needs a write transaction even though it only
@@ -435,6 +605,17 @@ class CorpusDB:
             ).fetchall()
             for (doc_id,) in orphans:
                 errors.append(f"{table}: row(s) point to missing document {doc_id!r}")
+
+        # Dangling scope links (D-018): a non-NULL section_id with no matching
+        # sections row. NULL section_id is the global-only atom and is fine.
+        for table in ("refs", "numbers", "entities"):
+            dangling = self._conn.execute(
+                f"SELECT DISTINCT section_id FROM {table}"
+                " WHERE section_id IS NOT NULL"
+                " AND section_id NOT IN (SELECT id FROM sections) ORDER BY section_id"
+            ).fetchall()
+            for (section_id,) in dangling:
+                errors.append(f"{table}: row(s) point to missing section {section_id!r}")
 
         stored = self.fingerprint()
         if stored and stored != self._compute_fingerprint():

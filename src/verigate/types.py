@@ -116,6 +116,13 @@ class Report:
     def n_unverifiable(self) -> int:
         return sum(1 for r in self.atoms if r.status == AtomStatus.UNVERIFIABLE)
 
+    @property
+    def is_grounded(self) -> bool:
+        """True iff every checkable atom verified (verdict VERIFIED). The
+        orchestration refusal signal for closed-domain deployments (D-018):
+        ``if not report.is_grounded: show a refusal instead of the answer``."""
+        return self.verdict is Verdict.VERIFIED
+
     def to_dict(self) -> dict:
         return {
             "verdict": self.verdict.value,

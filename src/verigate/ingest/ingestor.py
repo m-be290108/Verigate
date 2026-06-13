@@ -84,7 +84,9 @@ _HEADER_TOKEN_RE = re.compile(r"[a-z0-9]+")
 #: space/nbsp/narrow-nbsp/comma/dot/apostrophe separators. $/£ cells do NOT
 #: qualify — they carry an explicit non-EUR currency and are left to the
 #: rendered-text money extractor.
-_MONEY_CELL_RE = re.compile("\\d[\\d \u00a0\u202f.,']*")  # noqa: separators as escapes
+# Digits plus thousand/decimal separators (space, nbsp, narrow-nbsp, comma,
+# dot, apostrophe), written with escapes so the separators stay legible.
+_MONEY_CELL_RE = re.compile("\\d[\\d \u00a0\u202f.,']*")
 
 #: What canonical_number must yield for the cell to be indexed — anything
 #: else means the cell did not parse cleanly and is skipped, not indexed.
@@ -156,25 +158,6 @@ def _parse_glossary(path: Path) -> tuple[list[str], bytes]:
     return out, raw
 
 
-def _csv_entities(decoded: str) -> list[str]:
-    """Cell values of name/title/product/label columns with 1..6 words."""
-    rows = list(csv.reader(io.StringIO(decoded)))
-    if not rows:
-        return []
-    indexes = [
-        i for i, head in enumerate(rows[0]) if head.strip().lower() in _ENTITY_CSV_COLUMNS
-    ]
-    values: list[str] = []
-    for row in rows[1:]:
-        for i in indexes:
-            if i >= len(row):
-                continue
-            cell = row[i].strip()
-            if _ENTITY_MIN_WORDS <= len(cell.split()) <= _ENTITY_MAX_WORDS:
-                values.append(cell)
-    return values
-
-
 def _is_money_header(header: str) -> bool:
     """True iff `header` names a money-semantic column: price/prix/cost/
     montant as a substring ('PrixTTC', 'unit_price'), or eur/euro/euros as
@@ -201,41 +184,76 @@ def _money_cell_value(cell: str) -> str | None:
     return value if _CANONICAL_DECIMAL_RE.fullmatch(value) else None
 
 
-def _csv_money_amounts(decoded: str) -> list[tuple[str, str]]:
-    """(canonical value, raw cell) pairs from money-semantic columns
-    (D-016) — parsed cell-wise so bare decimals and French multi-comma
-    amounts ('3,284,71') index as money:EUR despite the missing € sign."""
-    rows = list(csv.reader(io.StringIO(decoded)))
-    if not rows:
-        return []
-    indexes = [i for i, head in enumerate(rows[0]) if _is_money_header(head)]
-    amounts: list[tuple[str, str]] = []
-    for row in rows[1:]:
-        for i in indexes:
-            if i >= len(row):
-                continue
-            value = _money_cell_value(row[i])
-            if value is not None:
-                amounts.append((value, row[i].strip()))
-    return amounts
+def _md_heading_entity(heading: str) -> str | None:
+    """The entity form of a level-2+ heading: parenthesized parts removed,
+    kept only when it has 1..6 words. None otherwise (same gate as the
+    historical ``_md_entities`` whole-document pass)."""
+    stripped = _PARENTHESIZED_RE.sub("", heading).strip()
+    if _ENTITY_MIN_WORDS <= len(stripped.split()) <= _ENTITY_MAX_WORDS:
+        return stripped
+    return None
 
 
-def _md_entities(text: str) -> list[str]:
-    """Level-2+ heading texts, parenthesized parts removed, 1..6 words."""
-    values: list[str] = []
-    for m in _MD_HEADING_RE.finditer(text):
-        heading = _PARENTHESIZED_RE.sub("", m.group("text")).strip()
-        if _ENTITY_MIN_WORDS <= len(heading.split()) <= _ENTITY_MAX_WORDS:
-            values.append(heading)
-    return values
+def _add_entities(
+    db: CorpusDB, values: list[str], doc_id: str, section_id: int | None = None
+) -> None:
+    """Register entity values for `doc_id`; empty canonicals are dropped.
 
-
-def _add_entities(db: CorpusDB, values: list[str], doc_id: str) -> None:
-    """Register entity values for `doc_id`; empty canonicals are dropped."""
+    ``section_id`` (default None) binds each entity to its section where
+    natural; it is not used by scoped value lookups (entities ARE subjects).
+    """
     for value in values:
         canonical = canonical_entity(value)
         if canonical:
-            db.add_entity(canonical, value.strip(), doc_id)
+            db.add_entity(canonical, value.strip(), doc_id, section_id)
+
+
+@dataclass(frozen=True)
+class _Section:
+    """A document slice that scopes its atoms to a subject (D-018).
+
+    ``subject_canonical`` '' means no subject; ``is_shared`` true means the
+    facts apply to ANY subject (preamble or whole unstructured document).
+    ``text`` is the slice the reference/number extractors run over.
+    """
+
+    subject_canonical: str
+    subject_raw: str
+    is_shared: bool
+    text: str
+
+
+def _markdown_sections(text: str) -> list[_Section]:
+    """Split markdown on ATX headings of level 2+ ('## ', '### ', …).
+
+    Text before the first such heading is one ``is_shared`` preamble section
+    (subject ''). Each heading starts a new section: ``subject_raw`` is the
+    heading text verbatim (any '(...)' parenthetical kept — the SKU inside is
+    useful); ``subject_canonical`` is ``canonical_entity`` of the heading
+    WITHOUT the parenthetical, falling back to the full heading when that is
+    empty. The sections tile the whole document, so every atom lands in
+    exactly one section and the global registries stay fully populated.
+    """
+    matches = list(_MD_HEADING_RE.finditer(text))
+    sections: list[_Section] = []
+    preamble = text[: matches[0].start()] if matches else text
+    # A preamble is always emitted (even if blank) so an md file with no
+    # level-2+ heading still contributes its facts as shared (global) atoms —
+    # the safe degrade, identical to an unstructured document.
+    if not matches or preamble.strip():
+        sections.append(_Section("", "", True, preamble))
+    for i, match in enumerate(matches):
+        heading = match.group("text").strip()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        # The section text spans from the heading line itself through to the
+        # next heading, so a reference/number written IN the heading (a SKU
+        # in '## TurboValve X (SKU TV-900-Z)') is extracted and scoped to its
+        # own section — and the global registry stays fully populated.
+        body = text[match.start() : end]
+        without_paren = _PARENTHESIZED_RE.sub("", heading).strip()
+        canonical = canonical_entity(without_paren) or canonical_entity(heading)
+        sections.append(_Section(canonical, heading, False, body))
+    return sections
 
 
 def _glossary_doc_id(glossary_file: Path, folder: Path) -> str:
@@ -245,6 +263,77 @@ def _glossary_doc_id(glossary_file: Path, folder: Path) -> str:
         return glossary_file.resolve().relative_to(folder.resolve()).as_posix()
     except ValueError:
         return f"glossary:{glossary_file.name}"
+
+
+def _csv_index_entities_and_money(
+    db: CorpusDB, decoded: str, doc_id: str, section_ids: list[int]
+) -> None:
+    """Register per-row CSV glossary entities (name/title/product/label cells,
+    1..6 words) and money-semantic amounts (D-016), each bound to that row's
+    section_id (D-018). ``section_ids`` is in data-row order — section i is
+    the i-th data row (one section per row, see :func:`_csv_sections`)."""
+    rows = list(csv.reader(io.StringIO(decoded)))
+    if not rows:
+        return
+    header = rows[0]
+    entity_indexes = [
+        i for i, head in enumerate(header) if head.strip().lower() in _ENTITY_CSV_COLUMNS
+    ]
+    money_indexes = [i for i, head in enumerate(header) if _is_money_header(head)]
+    for row_no, row in enumerate(rows[1:]):
+        # Defensive: more data rows than sections would only happen if the two
+        # CSV passes disagreed on row count (they do not); skip the overflow
+        # rather than mis-bind a section_id.
+        section_id = section_ids[row_no] if row_no < len(section_ids) else None
+        for i in entity_indexes:
+            if i >= len(row):
+                continue
+            cell = row[i].strip()
+            if _ENTITY_MIN_WORDS <= len(cell.split()) <= _ENTITY_MAX_WORDS:
+                _add_entities(db, [cell], doc_id, section_id)
+        for i in money_indexes:
+            if i >= len(row):
+                continue
+            value = _money_cell_value(row[i])
+            if value is not None:
+                db.add_number(f"money:EUR:{value}", row[i].strip(), "money", doc_id, section_id)
+
+
+def _csv_row_text(header: list[str], row: list[str]) -> str:
+    """Render one CSV data row exactly as :func:`loaders._load_csv` does
+    ('label: value | label: value', cells past the header labeled colN), so
+    the per-section extraction sees byte-identical text to the global pass."""
+    parts = []
+    for i, cell in enumerate(row):
+        label = header[i] if i < len(header) else f"col{i + 1}"
+        parts.append(f"{label}: {cell}")
+    return " | ".join(parts)
+
+
+def _csv_sections(decoded: str) -> list[_Section]:
+    """One section per CSV data row (D-018). The subject is the
+    name/title/product/label cell if present (``canonical_entity`` of it,
+    reusing the entity column detection), else the row is ``is_shared`` (it
+    has no subject — its facts apply globally, the safe degrade)."""
+    rows = list(csv.reader(io.StringIO(decoded)))
+    if not rows:
+        return []
+    header = rows[0]
+    subject_indexes = [
+        i for i, head in enumerate(header) if head.strip().lower() in _ENTITY_CSV_COLUMNS
+    ]
+    sections: list[_Section] = []
+    for row in rows[1:]:
+        subject_raw = ""
+        for i in subject_indexes:
+            if i < len(row) and row[i].strip():
+                subject_raw = row[i].strip()
+                break
+        canonical = canonical_entity(subject_raw)
+        sections.append(
+            _Section(canonical, subject_raw, not canonical, _csv_row_text(header, row))
+        )
+    return sections
 
 
 def ingest_folder(
@@ -328,18 +417,48 @@ def ingest_folder(
             sha256 = hashlib.sha256(source_bytes).hexdigest()
             db.add_document(relpath, str(path), text, sha256)
             seen.add(relpath)
-            for atom in extract_references(text, packs):
-                db.add_reference(atom.canonical, atom.raw, relpath, atom.pack)
-            for atom in extract_numbers(text):
-                kind = atom.pack.removeprefix("number:")
-                db.add_number(atom.canonical, atom.raw, kind, relpath)
+            # Sectioning (D-018): markdown splits on level-2+ headings, CSV is
+            # one section per row, everything else is ONE shared (global)
+            # section spanning the whole document — the safe degrade for
+            # unstructured content (its facts are always in scope). The
+            # sections tile the document, so every reference/number atom lands
+            # in exactly one section and the GLOBAL registries stay fully
+            # populated (section_id is an extra column global lookups ignore).
+            if suffix == ".md":
+                sections = _markdown_sections(text)
+            elif suffix == ".csv":
+                sections = _csv_sections(source_bytes.decode("utf-8"))
+            else:
+                sections = [_Section("", "", True, text)]
+            section_ids: list[int] = []
+            for ordinal, section in enumerate(sections):
+                section_id = db.add_section(
+                    relpath,
+                    ordinal,
+                    section.subject_canonical,
+                    section.subject_raw,
+                    section.is_shared,
+                )
+                section_ids.append(section_id)
+                for atom in extract_references(section.text, packs):
+                    db.add_reference(
+                        atom.canonical, atom.raw, relpath, atom.pack, section_id
+                    )
+                for atom in extract_numbers(section.text):
+                    kind = atom.pack.removeprefix("number:")
+                    db.add_number(atom.canonical, atom.raw, kind, relpath, section_id)
+                # A markdown heading entity is bound to its own section (the
+                # subject IS that section). Same 1..6-word gate as the
+                # historical whole-document entity pass, so the entity set is
+                # unchanged — only section_id is now populated.
+                if suffix == ".md" and not section.is_shared:
+                    entity = _md_heading_entity(section.subject_raw)
+                    if entity is not None:
+                        _add_entities(db, [entity], relpath, section_id)
             if suffix == ".csv":
-                decoded = source_bytes.decode("utf-8")
-                _add_entities(db, _csv_entities(decoded), relpath)
-                for value, raw_cell in _csv_money_amounts(decoded):
-                    db.add_number(f"money:EUR:{value}", raw_cell, "money", relpath)
-            elif suffix == ".md":
-                _add_entities(db, _md_entities(text), relpath)
+                _csv_index_entities_and_money(
+                    db, source_bytes.decode("utf-8"), relpath, section_ids
+                )
 
         if glossary_file is not None:
             doc_id = _glossary_doc_id(glossary_file, folder)
