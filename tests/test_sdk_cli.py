@@ -586,3 +586,36 @@ class TestReportCache:
         second = gate.verify(VERIFIED_ANSWER)
         assert second.to_json() == pristine
         gate.close()
+
+
+# ------------------------------------------------------ scoped / strict CLI
+
+
+class TestScopedStrictCLI:
+    """The D-018 verification posture is reachable from the CLI."""
+
+    CATALOG = (
+        "# Catalog\n\n## Alpha Widget\n\nPrice: €10.00.\n\n"
+        "## Bravo Widget\n\nPrice: €999.00.\n"
+    )
+
+    def _db(self, tmp_path):
+        folder = tmp_path / "data"
+        folder.mkdir()
+        (folder / "catalog.md").write_text(self.CATALOG, encoding="utf-8")
+        db = tmp_path / "corpus.db"
+        main(["ingest", str(folder), "--db", str(db)])
+        return db
+
+    def test_scoped_flag_catches_cross_attribution(self, tmp_path, capsys):
+        db = self._db(tmp_path)
+        # €999 is Bravo's price, attributed to Alpha.
+        rc = main(["verify", "--db", str(db), "--scoped", "The Alpha Widget costs €999.00."])
+        out = capsys.readouterr().out
+        assert "cross-attribution" in out
+        assert rc == 1  # CORRECTED exit code (D-010)
+
+    def test_without_scoped_the_same_answer_passes(self, tmp_path, capsys):
+        db = self._db(tmp_path)
+        rc = main(["verify", "--db", str(db), "The Alpha Widget costs €999.00."])
+        assert rc == 0  # VERIFIED — membership-only blesses it

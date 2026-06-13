@@ -43,6 +43,7 @@ from verigate.audit.trail import AuditIntegrityError, AuditTrail
 from verigate.corpus import CorpusDB
 from verigate.sdk import Gate
 from verigate.types import AtomStatus, Report, Verdict
+from verigate.verify.engine import VerifyConfig
 
 #: ``verify`` exit codes mirror the verdict gradation (D-010).
 _VERDICT_EXIT: dict[Verdict, int] = {
@@ -160,8 +161,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                 print(f"error: context file {name}: {exc}", file=sys.stderr)
                 return _EXIT_OPERATIONAL
 
+    config = VerifyConfig(scoped=args.scoped, strict=args.strict)
     try:
-        gate = Gate(args.db, audit_db=args.audit_db)
+        gate = Gate(args.db, audit_db=args.audit_db, config=config)
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return _EXIT_OPERATIONAL
@@ -226,7 +228,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             f"(pip install 'verigate[api]'): {exc}"
         )
     try:
-        app = create_app(args.db, audit_db=args.audit_db, cache_size=args.cache_size)
+        app = create_app(
+            args.db,
+            audit_db=args.audit_db,
+            config=VerifyConfig(scoped=args.scoped, strict=args.strict),
+            cache_size=args.cache_size,
+        )
     except FileNotFoundError as exc:
         return _fail(str(exc))
     uvicorn.run(app, host=args.host, port=args.port)
@@ -308,6 +315,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="trusted context chunk for this call (repeatable)",
     )
     p.add_argument("--json", action="store_true", help="print the JSON report")
+    p.add_argument(
+        "--scoped",
+        action="store_true",
+        help="verify each fact against the answer's subject section, not the "
+        "whole corpus (catches cross-attribution; D-018)",
+    )
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="closed-world: also remove unverifiable atoms (only grounded "
+        "facts are shown)",
+    )
     p.set_defaults(func=_cmd_verify)
 
     p = sub.add_parser("verify-corpus", help="run the corpus integrity lock")
@@ -330,6 +349,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="LRU report cache size, 0 = disabled (D-014: identical "
         "(answer, context) pairs are served from cache; audit entries are "
         "still recorded per call)",
+    )
+    p.add_argument(
+        "--scoped",
+        action="store_true",
+        help="serve the scoped (subject-aware) verification posture (D-018)",
+    )
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="serve the strict closed-world posture (only grounded facts shown)",
     )
     p.set_defaults(func=_cmd_serve)
 
