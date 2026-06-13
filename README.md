@@ -1,7 +1,7 @@
 # VeriGate
 
-<!-- Replace USERNAME with the GitHub account/org before publishing. -->
-[![CI](https://github.com/USERNAME/verigate/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/verigate/actions/workflows/ci.yml)
+<!-- GitHub repo: m-be290108/verigate -->
+[![CI](https://github.com/m-be290108/verigate/actions/workflows/ci.yml/badge.svg)](https://github.com/m-be290108/verigate/actions/workflows/ci.yml)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 
