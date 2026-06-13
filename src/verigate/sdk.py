@@ -28,7 +28,7 @@ from pathlib import Path
 from verigate.audit.trail import AuditTrail
 from verigate.corpus import CorpusDB
 from verigate.ingest.ingestor import IngestResult, ingest_folder
-from verigate.types import FALSE_STATUSES, Report
+from verigate.types import FALSE_STATUSES, AtomStatus, Report
 from verigate.verify.engine import Verifier, VerifyConfig
 
 
@@ -104,6 +104,17 @@ class Gate:
             rejected = sorted(
                 {r.atom.canonical for r in report.atoms if r.status in FALSE_STATUSES}
             )
+            # Provenance (D-018): the distinct source addresses each verified
+            # fact was grounded against — the traceable coordinate, not the
+            # answer's content (privacy by design). In scoped mode these are
+            # 'doc › §ordinal › subject'; in global mode, the doc id.
+            sources = sorted(
+                {
+                    r.matched_source
+                    for r in report.atoms
+                    if r.status is AtomStatus.VERIFIED and r.matched_source
+                }
+            )
             self._audit.record(
                 action="verify",
                 data={
@@ -112,6 +123,7 @@ class Gate:
                     "score": round(report.score, 4),
                     "n_false": report.n_false,
                     "rejected": rejected,
+                    "sources": sources,
                     "corpus_fingerprint": report.corpus_fingerprint,
                 },
             )

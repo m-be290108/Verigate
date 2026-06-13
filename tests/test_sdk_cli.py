@@ -49,6 +49,7 @@ EXPECTED_AUDIT_KEYS = {
     "score",
     "n_false",
     "rejected",
+    "sources",
     "corpus_fingerprint",
 }
 

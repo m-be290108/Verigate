@@ -231,3 +231,29 @@ class TestBackwardCompatibility:
         # both prices exist globally -> both verified, no scope warning
         assert r.verdict is Verdict.VERIFIED
         assert not any("scoped" in w for w in r.warnings)
+
+
+class TestProvenanceAddress:
+    """Each scoped-verified fact resolves to a traceable address
+    'doc › §ordinal › subject' (D-018 provenance)."""
+
+    def test_verified_fact_carries_its_address(self, corpus_db):
+        r = _verify(corpus_db, "The Alpha Widget costs €10.00.", scoped=True)
+        num = [x for x in r.atoms if x.atom.type is AtomType.NUMBER][0]
+        assert num.status is AtomStatus.VERIFIED
+        assert "›" in num.matched_source
+        assert "alpha widget" in num.matched_source.lower()
+        assert "catalog.md" in num.matched_source
+
+    def test_shared_fact_address_says_shared(self, corpus_db):
+        r = _verify(corpus_db, "The Alpha Widget has a 24 month warranty.", scoped=True)
+        verified_nums = [
+            x for x in r.atoms
+            if x.atom.type is AtomType.NUMBER and x.status is AtomStatus.VERIFIED
+        ]
+        assert any("shared" in x.matched_source for x in verified_nums)
+
+    def test_address_is_deterministic(self, corpus_db):
+        a = _verify(corpus_db, "The Alpha Widget costs €10.00.", scoped=True)
+        b = _verify(corpus_db, "The Alpha Widget costs €10.00.", scoped=True)
+        assert a.to_json() == b.to_json()

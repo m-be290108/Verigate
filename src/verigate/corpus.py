@@ -417,63 +417,63 @@ class CorpusDB:
         return row[0] if row else None
 
     def has_reference_scoped(self, canonical: str, subjects: frozenset[str]) -> str | None:
-        """A doc_id where this reference canonical appears in a section whose
-        ``subject_canonical`` is in `subjects` OR is ``is_shared=1`` (scoped
-        lookup, D-018), smallest doc_id for determinism; else None.
+        """The provenance ADDRESS where this reference canonical is grounded
+        in a section whose ``subject_canonical`` is in `subjects` OR is
+        ``is_shared=1`` (scoped lookup, D-018); else None. The address —
+        ``"doc › §ordinal › subject"`` — is the traceable coordinate of the
+        fact (the report surfaces it as ``matched_source``).
 
         Shared sections are always in scope (preamble/whole-document facts).
         An empty `subjects` set therefore still matches shared-section atoms.
         """
-        return self._scoped_lookup(
-            "SELECT r.doc_id AS match_doc FROM refs AS r JOIN sections AS s ON s.id = r.section_id"
-            " WHERE r.canonical = ?",
-            (canonical,),
-            subjects,
-        )
+        return self._scoped_lookup("refs", "r", canonical, None, subjects)
 
     def has_number_scoped(
         self, canonical: str, kind: str | None, subjects: frozenset[str]
     ) -> str | None:
-        """A doc_id where this number canonical (optionally restricted to
-        `kind`) appears in a section whose ``subject_canonical`` is in
-        `subjects` OR is ``is_shared=1`` (scoped lookup, D-018), smallest
-        doc_id for determinism; else None. ``kind=None`` matches any kind."""
-        if kind is None:
-            return self._scoped_lookup(
-                "SELECT n.doc_id AS match_doc FROM numbers AS n"
-                " JOIN sections AS s ON s.id = n.section_id WHERE n.canonical = ?",
-                (canonical,),
-                subjects,
-            )
-        return self._scoped_lookup(
-            "SELECT n.doc_id AS match_doc FROM numbers AS n"
-            " JOIN sections AS s ON s.id = n.section_id"
-            " WHERE n.canonical = ? AND n.kind = ?",
-            (canonical, kind),
-            subjects,
-        )
+        """The provenance ADDRESS where this number canonical (optionally
+        restricted to `kind`) is grounded in an in-scope section (D-018), or
+        None. ``kind=None`` matches any kind. See :meth:`has_reference_scoped`
+        for the address format."""
+        return self._scoped_lookup("numbers", "a", canonical, kind, subjects)
 
     def _scoped_lookup(
-        self, base_sql: str, base_params: tuple, subjects: frozenset[str]
+        self,
+        table: str,
+        _alias: str,
+        canonical: str,
+        kind: str | None,
+        subjects: frozenset[str],
     ) -> str | None:
-        """Shared body of the scoped lookups: add the in-scope section filter
-        (subject_canonical IN sorted(subjects) OR is_shared=1) to `base_sql`
-        and return the smallest doc_id, or None. Subjects are bound sorted so
-        the parameter order is deterministic (it does not affect the result,
-        but keeps the emitted SQL reproducible)."""
+        """Shared body of the scoped lookups. Join `table` to its section,
+        keep rows whose section is in scope (subject in sorted(subjects) OR
+        is_shared), and return the smallest (doc_id, ordinal)'s provenance
+        ADDRESS — ``"doc › §ordinal › subject"`` — or None. Subjects are bound
+        sorted so the emitted SQL is reproducible (order does not change the
+        result)."""
+        sql = (
+            f"SELECT a.doc_id, s.ordinal, s.subject_raw, s.is_shared"
+            f" FROM {table} AS a JOIN sections AS s ON s.id = a.section_id"
+            " WHERE a.canonical = ?"
+        )
+        params: list = [canonical]
+        if kind is not None:
+            sql += " AND a.kind = ?"
+            params.append(kind)
         ordered = sorted(subjects)
         if ordered:
             placeholders = ",".join("?" for _ in ordered)
-            sql = (
-                f"{base_sql} AND (s.is_shared = 1 OR s.subject_canonical IN ({placeholders}))"
-                " ORDER BY match_doc LIMIT 1"
-            )
-            params: tuple = base_params + tuple(ordered)
+            sql += f" AND (s.is_shared = 1 OR s.subject_canonical IN ({placeholders}))"
+            params.extend(ordered)
         else:
-            sql = f"{base_sql} AND s.is_shared = 1 ORDER BY match_doc LIMIT 1"
-            params = base_params
+            sql += " AND s.is_shared = 1"
+        sql += " ORDER BY a.doc_id, s.ordinal LIMIT 1"
         row = self._conn.execute(sql, params).fetchone()
-        return row[0] if row else None
+        if row is None:
+            return None
+        doc_id, ordinal, subject_raw, is_shared = row
+        subject = subject_raw if (subject_raw and not is_shared) else "shared"
+        return f"{doc_id} › §{ordinal} › {subject}"
 
     def entities(self) -> list[tuple[str, str]]:
         """All glossary entities as sorted (canonical, raw) pairs, deduped by
