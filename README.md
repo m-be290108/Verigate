@@ -237,11 +237,16 @@ atom, paraphrased quotes, inventions with no anchor in your glossary or
 packs. Those are flagged unverifiable at best — which is the honest signal
 that a human should look.
 
-## License
+## License & commercial use
 
 **FSL-1.1-ALv2** (Functional Source License) — see [LICENSE](LICENSE).
 
-In plain words: you may read, self-host, modify and use VeriGate for any
-purpose **except** offering it as a competing commercial product or service.
-Two years after each release, that version becomes Apache-2.0 (fully open
-source). This protects the work, not the idea — see `DECISIONS.md` (D-017).
+Open-core, in plain words: **free to self-host for your own use**, even
+commercially — verifying your own AI's answers costs nothing and needs no
+permission. You only need a commercial agreement to **embed or resell**
+VeriGate inside a product you sell, or to offer a competing product on its
+code. Two years after each release, that version becomes Apache-2.0. This
+protects the work, not the idea (D-017).
+
+Want to embed it, or want support / an enterprise tier? →
+[COMMERCIAL.md](COMMERCIAL.md).
