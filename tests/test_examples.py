@@ -104,3 +104,26 @@ def test_middleware_never_imports_anthropic(middleware_run):
         if line.startswith(("import anthropic", "from anthropic"))
     ]
     assert real_imports == []
+
+
+# ------------------------------------------------------- closed_domain.py
+
+
+@pytest.fixture(scope="module")
+def closed_domain_run() -> subprocess.CompletedProcess[str]:
+    """closed_domain.py executed once. Part A (the guarantee) always runs;
+    Part B is skipped when no local Ollama is reachable, so CI stays offline."""
+    return _run_example("closed_domain.py")
+
+
+def test_closed_domain_guarantee_holds(closed_domain_run):
+    assert closed_domain_run.returncode == 0, (
+        closed_domain_run.stdout + closed_domain_run.stderr
+    )
+    assert "guarantee held" in closed_domain_run.stdout
+
+
+def test_closed_domain_catches_cross_attribution_and_abstains(closed_domain_run):
+    # The €1299 cross-attribution must be flagged and the answer refused.
+    assert "cross-attribution" in closed_domain_run.stdout
+    assert "I can't confirm that from the official catalog." in closed_domain_run.stdout
