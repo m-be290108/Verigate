@@ -156,3 +156,25 @@ first plus execution, not the license. Licensor is currently the individual
 (Mathieu Bellot); transferable to a company once incorporated. Note: FSL is
 source-available, NOT OSI-approved open source — so pyproject keeps
 `license = { file = "LICENSE" }` and adds no "OSI Approved" classifier.
+
+## D-018 — Section-scoped verification: association, not just membership
+The real-data eval (BDPM) proved the membership-only engine's one real hole:
+a value that exists in the corpus for ANOTHER subject verified as VERIFIED
+(a price 372× wrong, but a different product's real price — cross-attribution,
+D-013). Fix: ingest splits documents into sections (md headings, CSV rows;
+unstructured docs degrade to one shared section), each with a subject; every
+ref/number atom is linked to its section. `VerifyConfig.scoped=True` detects
+the answer's subjects (the glossary entities it names, incl. D-015
+abbreviations) and verifies each fact against THOSE subjects' sections plus
+shared/preamble sections; a value found globally but not for the subject is
+MISMATCHED (cross-attribution, removed). No detectable subject → global
+fallback + an explicit warning (refusing everything would be wrong).
+`VerifyConfig.strict=True` adds the closed-world posture: UNVERIFIABLE atoms
+are also stripped (only grounded facts shown), and `Report.is_grounded` is the
+orchestration refusal signal. Both opt-in; default is byte-identical to the
+membership engine. Validated: cross-attribution 40/40 caught scoped (0/40
+global), grounded-answer false positives 1.28% (< 2% gate). The disambiguation
+narrows by type (€999 ≠ 999 L/min, already true) → subject (this section) →
+optionally field (label proximity, future). It guarantees FACTS, not judgment;
+see docs/GUARANTEE.md. Rejected: making scoped the default (riskier; the
+membership engine stays the stable baseline until a domain opts in).

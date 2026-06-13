@@ -131,6 +131,34 @@ identical report, proven by test), that you can show a regulator or a
 customer. Any marketing claim beyond this is a lie, and this repository
 refuses to make it.
 
+## The closed-domain guarantee (scoped + strict mode)
+
+For a bounded domain — your catalog, your policies, a body of law — VeriGate
+offers a stronger, opt-in posture:
+
+> No verifiable fact that isn't grounded in your corpus **for the subject of
+> the answer** reaches the user — it is removed, or the answer abstains.
+
+Turn it on with `VerifyConfig(scoped=True, strict=True)`:
+
+- **scoped** verifies each fact against the section of the answer's *subject*,
+  not the whole corpus. So a real value attributed to the wrong subject
+  (product A quoted at product B's genuine price) is caught — the
+  cross-attribution that plain membership misses (D-018). On real data (the
+  French BDPM medicines database) this caught **40/40** cross-attribution
+  cases that membership-only passed, at a **1.28%** false-positive cost.
+- **strict** shows only grounded facts: anything unverifiable is removed too,
+  and `report.is_grounded` tells your code when to abstain
+  (`if not report.is_grounded: show "I don't have that information"`).
+
+How does it know it's the *right* datum, not a similar value elsewhere? By
+deterministic narrowing — never guessing: **type** (€999 is not 999 L/min) →
+**subject** (this product's section) → optionally **field**. Each validated
+fact resolves to a precise, reproducible address. The full contract, and its
+honest limits, are in **[docs/GUARANTEE.md](docs/GUARANTEE.md)** — the document
+your security and compliance teams should read. Integration: see
+[docs/INTEGRATION.md](docs/INTEGRATION.md).
+
 ## Benchmark — what it proves, and what it can't
 
 **Read this scope first, before the numbers** (it is the honest part, and the
